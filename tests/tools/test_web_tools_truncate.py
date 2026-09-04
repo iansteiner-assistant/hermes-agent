@@ -55,6 +55,20 @@ class TestTruncation:
         assert "UNIQUE_MIDDLE_MARKER" in full
         assert "row 2500" in full  # the omitted-middle row is in the stored file
 
+    def test_truncation_footer_uses_docker_visible_cache_path(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        body = "\n".join(f"row {i}" for i in range(2000))
+
+        out, truncated = web_tools_truncate._truncate_with_footer(
+            body, "https://example.com/docker-doc", 3000,
+        )
+
+        assert truncated is True
+        assert "Full text saved to: /root/.hermes/cache/web/" in out
+        assert 'read_file path="/root/.hermes/cache/web/' in out
+        assert str(tmp_path) not in out
+
 
 class TestCharLimitConfig:
     def test_default_when_unset(self):
@@ -98,6 +112,48 @@ class TestEndToEnd:
         # No LLM was involved: para 0 (head) and the last para (tail) are verbatim.
         assert "para 0 " in content
         assert "para 2999 " in content
+
+    def test_repeat_extract_rewindows_cached_full_text_without_provider_call(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+        big = "\n".join(f"cached row {i}" for i in range(10_000))
+
+        class FakeProvider:
+            name = "fake-cache"
+            display_name = "Fake cache"
+
+            def __init__(self):
+                self.calls = 0
+
+            def supports_extract(self):
+                return True
+
+            async def extract(self, urls, **kwargs):
+                self.calls += 1
+                return [{
+                    "url": urls[0], "title": "Cached page", "content": big,
+                    "raw_content": big, "metadata": {},
+                }]
+
+        provider = FakeProvider()
+        url = "https://example.com/cache-rewindow"
+        with patch("tools.web_tools._ensure_web_plugins_loaded"), \
+             patch("tools.web_tools._get_extract_backend", return_value="fake-cache"), \
+             patch("tools.web_tools.async_is_safe_url", new=_AsyncTrue()), \
+             patch("agent.web_search_registry.get_provider", return_value=provider):
+            loop = asyncio.new_event_loop()
+            try:
+                first = json.loads(loop.run_until_complete(
+                    wt.web_extract_tool([url], char_limit=5000)
+                ))
+                second = json.loads(loop.run_until_complete(
+                    wt.web_extract_tool([url], char_limit=400000)
+                ))
+            finally:
+                loop.close()
+
+        assert provider.calls == 1
+        assert "[TRUNCATED]" in first["results"][0]["content"]
+        assert second["results"][0]["content"] == big
 
 
 def _make_awaitable(value):

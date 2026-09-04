@@ -105,11 +105,20 @@ def _truncate_with_footer(content: str, url: str, char_limit: int) -> tuple[str,
         f"of {len(content):,} total clean characters.",
     ]
     if stored_path:
+        # Cache storage is host-side, but read_file may execute in Docker or
+        # another remote backend. Keep the cache index host path unchanged and
+        # translate only the instruction rendered for the agent.
+        try:
+            from tools.credential_files import to_agent_visible_cache_path
+            visible_path = to_agent_visible_cache_path(stored_path)
+        except Exception as exc:  # noqa: BLE001 - footer fallback is best effort
+            logger.debug("Failed to translate web cache path %s: %s", stored_path, exc)
+            visible_path = stored_path
         # read_file is 1-indexed; +2 lands on the first line after the shown head.
         middle_start_line = head.count("\n") + 2
         footer_lines += [
-            f"Full text saved to: {stored_path}",
-            f'To read the omitted middle: read_file path="{stored_path}" '
+            f"Full text saved to: {visible_path}",
+            f'To read the omitted middle: read_file path="{visible_path}" '
             f"offset={middle_start_line} limit=200  (the file is the complete page; "
             f"raise/lower offset to page through it).",
         ]
