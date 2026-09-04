@@ -158,6 +158,67 @@ class TestHermesToolsGeneration(unittest.TestCase):
 
 
 class TestExecuteCodeRemoteTempDir(unittest.TestCase):
+    def test_rpc_result_shipping_chunks_large_payload_below_argv_limit(self):
+        from tools.code_execution_rpc import (
+            _REMOTE_BASE64_CHUNK_CHARS,
+            _ship_rpc_result,
+        )
+
+        class FakeEnv:
+            def __init__(self):
+                self.commands = []
+
+            def execute(self, command, cwd=None, timeout=None):
+                self.commands.append(command)
+                return {"output": "", "returncode": 0}
+
+        env = FakeEnv()
+        _ship_rpc_result(env, "/tmp/result.json", "x" * 383_555)
+
+        self.assertEqual(env.commands[0], ": > /tmp/result.json")
+        self.assertGreater(len(env.commands), 2)
+        self.assertTrue(all(
+            len(command) < _REMOTE_BASE64_CHUNK_CHARS + 100
+            for command in env.commands[1:]
+        ))
+
+    def test_remote_rpc_delivery_failure_does_not_redispatch_request(self):
+        from tools.code_execution_rpc import _rpc_poll_loop
+
+        stop_event = threading.Event()
+        request = json.dumps({
+            "tool": "web_extract",
+            "args": {"urls": ["https://example.com"], "char_limit": 450000},
+            "seq": 0,
+            "token": "rpc-token",
+        })
+
+        class FakeEnv:
+            def __init__(self):
+                self.removed = False
+
+            def execute(self, command, cwd=None, timeout=None):
+                if command.startswith("ls -1"):
+                    return {"output": "" if self.removed else "/tmp/rpc/req_000000\n", "returncode": 0}
+                if command.startswith("cat "):
+                    return {"output": request, "returncode": 0}
+                if command.startswith("rm -f "):
+                    self.removed = True
+                    stop_event.set()
+                return {"output": "", "returncode": 0}
+
+        counter = [0]
+        dispatcher = MagicMock(return_value="x" * 383_555)
+        with patch("model_tools.handle_function_call", dispatcher), \
+             patch("tools.code_execution_rpc._ship_rpc_result", side_effect=OSError("E2BIG")):
+            _rpc_poll_loop(
+                FakeEnv(), "/tmp/rpc", "task", [], counter, 50,
+                frozenset({"web_extract"}), stop_event, "rpc-token",
+            )
+
+        self.assertEqual(counter[0], 1)
+        dispatcher.assert_called_once()
+
     def test_execute_remote_uses_backend_temp_dir_for_sandbox(self):
         class FakeEnv:
             def __init__(self):

@@ -21,6 +21,8 @@ from tools.registry import tool_error
 # Logger name kept as the origin module's so existing log expectations hold.
 logger = logging.getLogger("tools.code_execution_tool")
 
+_REMOTE_BASE64_CHUNK_CHARS = 60_000
+
 # Terminal parameters that must not be used from ephemeral sandbox scripts.
 _TERMINAL_BLOCKED_PARAMS = {"background", "pty", "notify", "notify_on_complete", "watch_patterns"}
 
@@ -127,6 +129,19 @@ def _rpc_server_loop(server_sock: socket.socket, task_id: str, tool_call_log: li
                 logger.debug("RPC conn close error: %s", e)
 
 
+def _ship_rpc_result(env, remote_path: str, content: str) -> None:
+    """Write an RPC result with shell arguments kept comfortably below ARG_MAX."""
+    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    quoted_path = shlex.quote(remote_path)
+    env.execute(f": > {quoted_path}", cwd="/", timeout=30)
+    for start in range(0, len(encoded), _REMOTE_BASE64_CHUNK_CHARS):
+        chunk = encoded[start:start + _REMOTE_BASE64_CHUNK_CHARS]
+        env.execute(
+            f"printf '%s' '{chunk}' | base64 -d >> {quoted_path}",
+            cwd="/", timeout=30,
+        )
+
+
 def _rpc_poll_loop(env, rpc_dir: str, task_id: str, tool_call_log: list, tool_call_counter: list,
                    max_tool_calls: int, allowed_tools: frozenset, stop_event: threading.Event,
                    rpc_token: str):
@@ -166,16 +181,18 @@ def _rpc_poll_loop(env, rpc_dir: str, task_id: str, tool_call_log: list, tool_ca
                     max_tool_calls=max_tool_calls, dispatch=dispatch, tool_call_log=tool_call_log,
                     call_start=call_start, where="remote sandbox",
                 )
-                # Write the response atomically (tmp + rename) via echo piping —
-                # Modal doesn't reliably deliver stdin_data to chained commands.
                 quoted_res_file = shlex.quote(f"{rpc_dir}/res_{request.get('seq', 0):06d}")
-                encoded_result = base64.b64encode(tool_result.encode("utf-8")).decode("ascii")
-                env.execute(
-                    f"echo '{encoded_result}' | base64 -d > {quoted_res_file}.tmp"
-                    f" && mv {quoted_res_file}.tmp {quoted_res_file}",
-                    cwd="/", timeout=60,
-                )
-                env.execute(f"rm -f {quoted_req_file}", cwd="/", timeout=5)
+                # Publish only a complete, chunked response. Once an authenticated
+                # request has dispatched, remove it even when delivery fails so a
+                # later poll can never execute the same side effect again.
+                try:
+                    _ship_rpc_result(env, f"{rpc_dir}/res_{request.get('seq', 0):06d}.tmp", tool_result)
+                    env.execute(
+                        f"mv {quoted_res_file}.tmp {quoted_res_file}",
+                        cwd="/", timeout=60,
+                    )
+                finally:
+                    env.execute(f"rm -f {quoted_req_file}", cwd="/", timeout=5)
         except Exception as e:
             if not stop_event.is_set():
                 logger.debug("RPC poll error: %s", e, exc_info=True)
