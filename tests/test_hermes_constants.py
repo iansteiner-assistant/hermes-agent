@@ -362,6 +362,56 @@ class TestIsContainer:
         assert is_container() is True
 
 
+    def test_detects_cgroup_v2_container_root_mount(self, monkeypatch, tmp_path):
+        import builtins
+
+        self._reset_cache(monkeypatch)
+        monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+        monkeypatch.setattr(os.path, "exists", lambda _path: False)
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("0::/\n")
+        mountinfo = tmp_path / "mountinfo"
+        mountinfo.write_text("123 122 0:42 /containerd/rootfs / rw - overlay overlay rw\n")
+        real_open = builtins.open
+
+        def fake_open(path, *args, **kwargs):
+            if path == "/proc/1/cgroup":
+                return real_open(cgroup, *args, **kwargs)
+            if path == "/proc/self/mountinfo":
+                return real_open(mountinfo, *args, **kwargs)
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", fake_open)
+        assert is_container() is True
+
+
+    def test_containerd_host_mount_does_not_make_host_a_container(self, monkeypatch, tmp_path):
+        import builtins
+
+        self._reset_cache(monkeypatch)
+        monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+        monkeypatch.setattr(os.path, "exists", lambda _path: False)
+        cgroup = tmp_path / "cgroup"
+        cgroup.write_text("0::/init.scope\n")
+        mountinfo = tmp_path / "mountinfo"
+        mountinfo.write_text(
+            "31 1 8:1 / / rw - ext4 /dev/sda1 rw\n"
+            "36 31 0:65 / /var/lib/docker/rootfs/overlayfs/abc rw "
+            "- overlay overlay rw,lowerdir=/var/lib/containerd/snapshots/1/fs\n"
+        )
+        real_open = builtins.open
+
+        def fake_open(path, *args, **kwargs):
+            if path == "/proc/1/cgroup":
+                return real_open(cgroup, *args, **kwargs)
+            if path == "/proc/self/mountinfo":
+                return real_open(mountinfo, *args, **kwargs)
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", fake_open)
+        assert is_container() is False
+
+
 
     def test_caches_result(self, monkeypatch):
         """Second call uses cached value without re-probing."""

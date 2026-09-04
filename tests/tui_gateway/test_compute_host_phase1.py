@@ -13,6 +13,7 @@ from tui_gateway.compute_host import ComputeHost, _default_workers
 from tui_gateway.host_supervisor import (
     MUTATOR_ROUTE_TABLE,
     HostSupervisor,
+    _build_compute_host_env,
     append_log_record,
 )
 
@@ -46,6 +47,23 @@ def test_compute_host_workers_inherit_tui_pool_env_or_8(monkeypatch):
     # Dead-RC tombstone: malformed env falls back to 8, not the old except-branch 4.
     monkeypatch.setenv("HERMES_TUI_RPC_POOL_WORKERS", "not-an-int")
     assert _default_workers() == 8
+
+
+def test_compute_host_env_does_not_restore_scrubbed_parent_values(monkeypatch):
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "must-not-reach-child")
+    monkeypatch.setenv("OPENAI_API_KEY", "model-child-needs-this")
+    monkeypatch.setenv("ORDINARY_PARENT_SETTING", "retained")
+
+    env = _build_compute_host_env(
+        overrides={"EXPLICIT_COMPUTE_OVERRIDE": "yes"},
+        heartbeat_secs=15,
+    )
+
+    assert "DISCORD_BOT_TOKEN" not in env
+    assert env["OPENAI_API_KEY"] == "model-child-needs-this"
+    assert env["ORDINARY_PARENT_SETTING"] == "retained"
+    assert env["EXPLICIT_COMPUTE_OVERRIDE"] == "yes"
+    assert env["HERMES_COMPUTE_HOST_HEARTBEAT_SECS"] == "15"
 
 
 def test_compute_host_routes_clarify_response_to_child_pending_registry(monkeypatch):
