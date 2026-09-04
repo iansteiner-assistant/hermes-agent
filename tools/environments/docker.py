@@ -126,6 +126,57 @@ def _container_identity(shared_key: str = "") -> str:
     return f"{_sanitize_label_value(shared_key)[:50]}-{digest}"
 
 
+def _normalize_bind_source(path: str) -> str:
+    """Normalize a bind source without resolving symlinks.
+
+    Docker pins the path selected when a container is created. Resolving a
+    replacement symlink here would hide exactly the stale file mount that the
+    reuse check needs to detect.
+    """
+    return os.path.normpath(os.path.abspath(os.path.expanduser(path)))
+
+
+def _parse_docker_volume_arg(spec: str) -> Optional[tuple[str, str, bool]]:
+    """Return ``(source, destination, rw)`` for a host-path ``-v`` spec."""
+    if not isinstance(spec, str):
+        return None
+    mount_spec, options = spec, ""
+    left, separator, last = spec.rpartition(":")
+    option_tokens = {item.strip().lower() for item in last.split(",") if item.strip()}
+    if separator and option_tokens and option_tokens <= {
+        "ro", "rw", "readonly", "z", "cached", "delegated", "consistent",
+    }:
+        mount_spec, options = left, last
+    source, separator, destination = mount_spec.rpartition(":")
+    if not separator or not source or not destination or not os.path.isabs(source):
+        return None
+    option_tokens = {item.strip().lower() for item in options.split(",") if item.strip()}
+    readonly = bool(option_tokens & {"ro", "readonly"})
+    return _normalize_bind_source(source), destination, not readonly
+
+
+def _desired_bind_mounts_from_run_args(run_args: list[str]) -> dict[str, tuple[str, bool]]:
+    """Collect generated ``-v`` bind mounts, keyed by container destination."""
+    mounts: dict[str, tuple[str, bool]] = {}
+    index = 0
+    while index < len(run_args):
+        arg = run_args[index]
+        spec: Optional[str] = None
+        if arg in {"-v", "--volume"} and index + 1 < len(run_args):
+            spec = run_args[index + 1]
+            index += 2
+        elif isinstance(arg, str) and arg.startswith("--volume="):
+            spec = arg.split("=", 1)[1]
+            index += 1
+        else:
+            index += 1
+        parsed = _parse_docker_volume_arg(spec) if spec is not None else None
+        if parsed is not None:
+            source, destination, rw = parsed
+            mounts[destination] = (source, rw)
+    return mounts
+
+
 def reap_orphan_containers(
     *, max_age_seconds: int = 600, profile_filter: str | None = None, docker_exe: str | None = None,
 ) -> int:
@@ -950,6 +1001,71 @@ class DockerEnvironment(BaseEnvironment):
             fail="docker inspect NetworkMode failed: %s", nonzero="docker inspect NetworkMode returned %d: %s")
         return (result.stdout.strip() or None) if result is not None else None
 
+    def _inspect_bind_mounts(self, container_id: str) -> Optional[dict[str, tuple[str, bool]]]:
+        """Return existing bind mounts keyed by destination; fail closed on inspection errors."""
+        result = _docker_query(
+            [self._docker_exe, "inspect", "--format", "{{json .Mounts}}", container_id], timeout=10,
+            fail="docker inspect mounts failed: %s",
+            nonzero="docker inspect mounts returned %d: %s")
+        if result is None:
+            return None
+        try:
+            raw_mounts = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError:
+            logger.debug("docker inspect mounts returned invalid JSON for %s", container_id[:12])
+            return None
+        mounts: dict[str, tuple[str, bool]] = {}
+        for entry in raw_mounts if isinstance(raw_mounts, list) else []:
+            if not isinstance(entry, dict) or entry.get("Type") != "bind":
+                continue
+            source, destination = entry.get("Source"), entry.get("Destination")
+            if isinstance(source, str) and isinstance(destination, str):
+                mounts[destination] = (_normalize_bind_source(source), bool(entry.get("RW", True)))
+        return mounts
+
+    def _container_mounts_match_run_args(self, container_id: str) -> bool:
+        desired = _desired_bind_mounts_from_run_args(self._all_run_args)
+        if not desired:
+            return True
+        existing = self._inspect_bind_mounts(container_id)
+        if existing is None:
+            return False
+        for destination, expected in desired.items():
+            if existing.get(destination) != expected:
+                logger.info(
+                    "Reusable container %s has a missing or stale bind mount for %s",
+                    container_id[:12], destination)
+                return False
+        return True
+
+    def current_credential_mounts_satisfied(self) -> bool:
+        """Whether this live container includes every credential registered now."""
+        if not self._container_id:
+            return False
+        try:
+            from tools.credential_files import get_credential_file_mounts
+            desired = {
+                entry["container_path"]: (_normalize_bind_source(entry["host_path"]), False)
+                for entry in get_credential_file_mounts()
+                if isinstance(entry, dict)
+                and isinstance(entry.get("host_path"), str)
+                and isinstance(entry.get("container_path"), str)
+            }
+        except Exception as exc:
+            logger.debug("Could not resolve current credential mounts: %s", exc)
+            return False
+        if not desired:
+            return True
+        existing = self._inspect_bind_mounts(self._container_id)
+        return existing is not None and all(existing.get(dst) == expected for dst, expected in desired.items())
+
+    def _remove_stale_reusable_container(self, container_id: str) -> None:
+        try:
+            run_capture([self._docker_exe, "rm", "-f", container_id], timeout=30)
+            logger.info("Removed stale reusable container %s", container_id[:12])
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            logger.warning("Failed to remove stale reusable container %s: %s", container_id[:12], exc)
+
     def _find_reusable_container(
         self, task_label: str, profile_label: str, egress_label: str) -> Optional[tuple[str, str]]:
         """``(container_id, state)`` of an existing container labeled for this task/profile/
@@ -973,10 +1089,10 @@ class DockerEnvironment(BaseEnvironment):
             nonzero="docker ps probe returned %d: %s — will start a fresh container")
         if result is None:
             return None
-        # Multiple matches can happen after a crash mid-cleanup: prefer a running
-        # one, else the first listed; stale duplicates are the orphan reaper's job.
+        # Multiple matches can happen after a crash mid-cleanup. Prefer a running
+        # candidate whose immutable bind mounts still match the desired run args.
         nparts = 3 if egress_off else 2
-        running = first = None
+        candidates: list[tuple[str, str]] = []
         for ln in (ln for ln in result.stdout.splitlines() if ln.strip()):
             parts = ln.split("\t", nparts - 1)
             if len(parts) != nparts:
@@ -986,11 +1102,13 @@ class DockerEnvironment(BaseEnvironment):
                 logger.debug(
                     "skipping container %s for egress=off reuse: label %s=%r", cid, _EGRESS_LABEL_KEY, parts[2])
                 continue
-            if first is None:
-                first = (cid, state)
-            if state == "running" and running is None:
-                running = (cid, state)
-        return running or first
+            candidates.append((cid, state))
+        candidates.sort(key=lambda item: 0 if item[1] == "running" else 1)
+        for cid, state in candidates:
+            if self._container_mounts_match_run_args(cid):
+                return cid, state
+            self._remove_stale_reusable_container(cid)
+        return None
 
     def _remove_bind_dirs(self) -> None:
         for d in (self._workspace_dir, self._home_dir):

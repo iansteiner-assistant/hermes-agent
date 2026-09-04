@@ -953,6 +953,39 @@ def _plan_execution(
     )
 
 
+def _cached_env_missing_required_credentials(env_type: str, env: Any) -> bool:
+    """Whether a cached Docker container lacks credentials registered since creation."""
+    if env_type != "docker":
+        return False
+    checker = getattr(env, "current_credential_mounts_satisfied", None)
+    if not callable(checker):
+        return False
+    try:
+        return not bool(checker())
+    except Exception as exc:
+        logger.debug("Could not validate cached Docker credential mounts: %s", exc)
+        return True
+
+
+def _discard_cached_env_for_recreation(env: Any) -> bool:
+    """Evict *env* by identity and force-remove its immutable Docker container."""
+    removed = False
+    with _env_lock:
+        for key, candidate in list(_active_environments.items()):
+            if candidate is env:
+                _active_environments.pop(key, None)
+                _last_activity.pop(key, None)
+                removed = True
+    if not removed:
+        return False
+    logger.info("Recreating cached terminal environment because credential mounts changed")
+    try:
+        env.cleanup(force_remove=True)
+    except Exception as exc:
+        logger.warning("Cleanup while recreating cached terminal environment failed: %s", exc)
+    return True
+
+
 def _acquire_env(plan: _ExecPlan, task_id: Optional[str]) -> Any:
     """Cached env for the task, else create it under the per-task creation lock.
 
@@ -967,7 +1000,9 @@ def _acquire_env(plan: _ExecPlan, task_id: Optional[str]) -> Any:
     with _env_lock:
         env: Any = _lookup_active_env(eff, task_id)
     if env is not None:
-        return env
+        if not _cached_env_missing_required_credentials(env_type, env):
+            return env
+        _discard_cached_env_for_recreation(env)
 
     with _creation_locks_lock:
         task_lock = _creation_locks.setdefault(eff, threading.Lock())
@@ -976,7 +1011,9 @@ def _acquire_env(plan: _ExecPlan, task_id: Optional[str]) -> Any:
         with _env_lock:
             env = _lookup_active_env(eff, task_id)
         if env is not None:
-            return env
+            if not _cached_env_missing_required_credentials(env_type, env):
+                return env
+            _discard_cached_env_for_recreation(env)
 
         if env_type == "singularity":
             _check_disk_usage_warning()
