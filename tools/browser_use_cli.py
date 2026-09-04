@@ -201,14 +201,22 @@ def is_legacy_browser_use_cloud_config(browser_cfg: dict) -> bool:
 
 
 def is_browser_use_cli_mode() -> bool:
-    """True when the Browser Use CLI replaces the built-in browser stack. Browser Use mode is the DEFAULT:
-    unset ``browser.backend`` ("") enables it whenever the CLI is runnable (installed binary or uvx);
-    ``browser.backend: off`` keeps the built-in browser_* tools. Camofox always falls back to the built-in
-    tools (Firefox, custom HTTP API, no CDP surface for the harness)."""
+    """True when the Browser Use CLI replaces the built-in browser stack.
+
+    With no explicit backend, only a persistently installed ``browser-use``
+    binary may replace the built-in tools. A generic ``uvx`` launcher remains
+    available for an explicit Browser Use selection, but does not establish
+    that browser-harness can attach to or launch Chrome.
+    """
     if _camofox_active():
         return False
     backend = get_browser_backend()
-    return backend == _BACKEND_KEY if backend else (is_legacy_browser_use_cloud_config(_read_browser_cfg()) or _find_cli() is not None)
+    if backend:
+        return backend == _BACKEND_KEY
+    if is_legacy_browser_use_cloud_config(_read_browser_cfg()):
+        return True
+    cli = _find_cli()
+    return bool(cli and len(cli) == 1)
 
 
 def default_downgrade_notice() -> Optional[str]:

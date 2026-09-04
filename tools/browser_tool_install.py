@@ -224,6 +224,41 @@ def _has_chromium_build(root: str) -> bool:
         return False
 
 
+def _find_chromium_executable() -> Optional[str]:
+    """Return a concrete executable for an installed Chrome/Chromium build."""
+    configured = os.environ.get("AGENT_BROWSER_EXECUTABLE_PATH", "").strip()
+    if configured:
+        if os.path.isfile(configured) and (os.name == "nt" or os.access(configured, os.X_OK)):
+            return configured
+        if resolved := shutil.which(configured):
+            return resolved
+
+    for name in ("google-chrome", "chromium", "chromium-browser", "chrome"):
+        if resolved := shutil.which(name):
+            return resolved
+
+    home = Path(os.path.expanduser("~"))
+    candidates: list[tuple[Path, str]] = [
+        (home, ".agent-browser/browsers/chrome-*/chrome"),
+        (home, ".agent-browser/browsers/chrome-*/chrome.exe"),
+    ]
+    for root in map(Path, _chromium_search_roots()):
+        candidates.extend(
+            [
+                (root, "chromium-*/chrome-linux*/chrome"),
+                (root, "chromium-*/chrome-win*/chrome.exe"),
+                (root, "chromium_headless_shell-*/chrome-headless-shell-linux*/headless_shell"),
+                (root, "chromium_headless_shell-*/chrome-headless-shell-win*/headless_shell.exe"),
+            ]
+        )
+
+    for root, pattern in candidates:
+        for candidate in sorted(root.glob(pattern), reverse=True):
+            if candidate.is_file() and (os.name == "nt" or os.access(candidate, os.X_OK)):
+                return str(candidate)
+    return None
+
+
 def _chromium_installed() -> bool:
     """True when a usable Chromium (or headless-shell) build is on disk; cached.
 
@@ -233,12 +268,7 @@ def _chromium_installed() -> bool:
     _bt = _origin()
     if _bt._cached_chromium_installed is not None:
         return _bt._cached_chromium_installed
-    ab_path = os.environ.get("AGENT_BROWSER_EXECUTABLE_PATH", "").strip()
-    _bt._cached_chromium_installed = bool(
-        (ab_path and (os.path.isfile(ab_path) or shutil.which(ab_path)))
-        or any(shutil.which(name) for name in ("google-chrome", "chromium", "chromium-browser", "chrome"))
-        or any(root and os.path.isdir(root) and _has_chromium_build(root) for root in _chromium_search_roots())
-    )
+    _bt._cached_chromium_installed = _find_chromium_executable() is not None
     return _bt._cached_chromium_installed
 
 

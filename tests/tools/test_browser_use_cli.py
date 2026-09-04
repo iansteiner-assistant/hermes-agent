@@ -67,6 +67,12 @@ class TestModeDetection:
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: None)
         assert bu_cli.is_browser_use_cli_mode() is False
 
+    def test_default_off_for_zero_install_uvx_fallback(self, monkeypatch):
+        """A generic uvx launcher does not prove Browser Use can launch Chrome."""
+        monkeypatch.setattr("hermes_cli.config.read_raw_config", lambda: {})
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: ["/usr/bin/uvx", "browser-use"])
+        assert bu_cli.is_browser_use_cli_mode() is False
+
     def test_explicit_off_wins_over_default(self, monkeypatch):
         monkeypatch.setattr(
             "hermes_cli.config.read_raw_config",

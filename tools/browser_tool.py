@@ -42,6 +42,15 @@ def _build_browser_env() -> dict:
 
     env = hermes_subprocess_env(inherit_credentials=False)
     env.update({k: os.environ[k] for k in _BROWSER_PASSTHROUGH_KEYS if k in os.environ})
+    # Profile workers may intentionally use a profile-scoped subprocess HOME,
+    # while browser discovery runs in the gateway user's shared HOME. Pin the
+    # concrete executable that discovery found so both sides use the same
+    # already-installed browser rather than silently disagreeing on readiness.
+    if not env.get("AGENT_BROWSER_EXECUTABLE_PATH"):
+        from tools.browser_tool_install import _find_chromium_executable
+
+        if chromium := _find_chromium_executable():
+            env["AGENT_BROWSER_EXECUTABLE_PATH"] = chromium
     return env
 
 

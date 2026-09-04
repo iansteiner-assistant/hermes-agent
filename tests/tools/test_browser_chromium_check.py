@@ -51,11 +51,43 @@ class TestChromiumInstalled:
 
     def test_result_cached(self, monkeypatch, tmp_path):
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
-        (tmp_path / "chromium-1208").mkdir()
+        chromium = tmp_path / "chromium-1208" / "chrome-linux64" / "chrome"
+        chromium.parent.mkdir(parents=True)
+        chromium.write_text("browser")
+        chromium.chmod(0o755)
         assert bt_install._chromium_installed() is True
         # Delete after first call — cached True should still return True.
-        (tmp_path / "chromium-1208").rmdir()
+        chromium.unlink()
         assert bt_install._chromium_installed() is True
+
+    def test_partial_playwright_directory_is_not_browser_ready(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "browsers"))
+        (tmp_path / "browsers" / "chromium-1208").mkdir(parents=True)
+        monkeypatch.setattr(bt_install.shutil, "which", lambda *_args, **_kwargs: None)
+
+        assert bt_install._chromium_installed() is False
+
+    def test_shared_chrome_is_pinned_for_profile_subprocess_home(self, monkeypatch, tmp_path):
+        shared_home = tmp_path / "shared"
+        profile_home = tmp_path / "profile" / "home"
+        chrome = shared_home / ".agent-browser" / "browsers" / "chrome-123" / "chrome"
+        chrome.parent.mkdir(parents=True)
+        chrome.write_text("browser")
+        chrome.chmod(0o755)
+        profile_home.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(shared_home))
+        monkeypatch.delenv("AGENT_BROWSER_EXECUTABLE_PATH", raising=False)
+        monkeypatch.setattr(bt_install.shutil, "which", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            "tools.environments.local.hermes_subprocess_env",
+            lambda **_kwargs: {"HOME": str(profile_home)},
+        )
+
+        env = bt._build_browser_env()
+
+        assert env["HOME"] == str(profile_home)
+        assert env["AGENT_BROWSER_EXECUTABLE_PATH"] == str(chrome)
 
 
 class TestCheckBrowserRequirementsChromium:
@@ -66,7 +98,10 @@ class TestCheckBrowserRequirementsChromium:
         monkeypatch.setattr("tools.browser_tool_install._requires_real_termux_browser_install", lambda _: False)
         monkeypatch.setattr(bt_cloud, "_get_cloud_provider", lambda: None)
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
-        (tmp_path / "chromium-1208").mkdir()
+        chromium = tmp_path / "chromium-1208" / "chrome-linux64" / "chrome"
+        chromium.parent.mkdir(parents=True)
+        chromium.write_text("browser")
+        chromium.chmod(0o755)
 
         assert bt_install.check_browser_requirements() is True
 
@@ -84,5 +119,4 @@ class TestRunBrowserCommandChromiumGuard:
     """Verify _run_browser_command fails fast (no timeout hang) when
     Chromium is missing in local mode.
     """
-
 

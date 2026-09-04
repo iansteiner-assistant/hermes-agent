@@ -371,8 +371,9 @@ DEFAULT_CONFIG = {
     },
 
     "browser": {
-        # "" = Browser Use mode when the browser-use CLI (or uvx) is available, else built-in tools
-        # (Camofox setups always keep built-in tools: no CDP surface); "browser-use" = force one
+        # "" = Browser Use mode when its CLI is installed, else built-in tools. A bare uvx fallback
+        # is reserved for explicit Browser Use selection (Camofox always keeps built-in tools);
+        # "browser-use" = force one
         # browser_exec tool driving the Browser Use CLI over any CDP backend (local Chrome, cloud);
         # "off" = force the built-in browser_navigate/browser_click/... tools.
         "backend": "",
