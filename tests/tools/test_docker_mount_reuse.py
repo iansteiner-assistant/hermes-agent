@@ -35,6 +35,13 @@ def test_reusable_container_rejected_when_credential_mount_source_drifted(monkey
     ]
 
     monkeypatch.setattr(
+        "tools.credential_files.get_credential_file_mounts",
+        lambda: [{
+            "host_path": "/home/hermes/.hermes/google-shared/google_token.json",
+            "container_path": "/root/.hermes/google_token.json",
+        }],
+    )
+    monkeypatch.setattr(
         env,
         "_inspect_bind_mounts",
         lambda _container_id: {
@@ -55,6 +62,13 @@ def test_reusable_container_accepted_when_required_mounts_match(monkeypatch) -> 
         "/home/hermes/.hermes/google-shared/google_token.json:/root/.hermes/google_token.json:ro",
     ]
 
+    monkeypatch.setattr(
+        "tools.credential_files.get_credential_file_mounts",
+        lambda: [{
+            "host_path": "/home/hermes/.hermes/google-shared/google_token.json",
+            "container_path": "/root/.hermes/google_token.json",
+        }],
+    )
     monkeypatch.setattr(
         env,
         "_inspect_bind_mounts",
@@ -120,6 +134,13 @@ def test_reuse_discards_stale_candidate_before_accepting_current_one(monkeypatch
     env._all_run_args = ["-v", "/new/token:/root/.hermes/google_token.json:ro"]
     removed = []
 
+    monkeypatch.setattr(
+        "tools.credential_files.get_credential_file_mounts",
+        lambda: [{
+            "host_path": "/new/token",
+            "container_path": "/root/.hermes/google_token.json",
+        }],
+    )
     monkeypatch.setattr(
         docker_module,
         "_docker_query",

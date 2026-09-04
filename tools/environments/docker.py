@@ -177,6 +177,22 @@ def _desired_bind_mounts_from_run_args(run_args: list[str]) -> dict[str, tuple[s
     return mounts
 
 
+def _desired_credential_bind_mounts() -> Optional[dict[str, tuple[str, bool]]]:
+    """Current credential binds only; ``None`` means resolution failed closed."""
+    try:
+        from tools.credential_files import get_credential_file_mounts
+        return {
+            entry["container_path"]: (_normalize_bind_source(entry["host_path"]), False)
+            for entry in get_credential_file_mounts()
+            if isinstance(entry, dict)
+            and isinstance(entry.get("host_path"), str)
+            and isinstance(entry.get("container_path"), str)
+        }
+    except Exception as exc:
+        logger.debug("Could not resolve current credential mounts: %s", exc)
+        return None
+
+
 def reap_orphan_containers(
     *, max_age_seconds: int = 600, profile_filter: str | None = None, docker_exe: str | None = None,
 ) -> int:
@@ -1024,7 +1040,9 @@ class DockerEnvironment(BaseEnvironment):
         return mounts
 
     def _container_mounts_match_run_args(self, container_id: str) -> bool:
-        desired = _desired_bind_mounts_from_run_args(self._all_run_args)
+        desired = _desired_credential_bind_mounts()
+        if desired is None:
+            return False
         if not desired:
             return True
         existing = self._inspect_bind_mounts(container_id)
@@ -1042,17 +1060,8 @@ class DockerEnvironment(BaseEnvironment):
         """Whether this live container includes every credential registered now."""
         if not self._container_id:
             return False
-        try:
-            from tools.credential_files import get_credential_file_mounts
-            desired = {
-                entry["container_path"]: (_normalize_bind_source(entry["host_path"]), False)
-                for entry in get_credential_file_mounts()
-                if isinstance(entry, dict)
-                and isinstance(entry.get("host_path"), str)
-                and isinstance(entry.get("container_path"), str)
-            }
-        except Exception as exc:
-            logger.debug("Could not resolve current credential mounts: %s", exc)
+        desired = _desired_credential_bind_mounts()
+        if desired is None:
             return False
         if not desired:
             return True
