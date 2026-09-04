@@ -37,12 +37,12 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
-from _hermes_home import display_hermes_home, get_hermes_home
+from _hermes_home import display_google_credentials_home, get_google_credentials_home
 
-HERMES_HOME = get_hermes_home()
-TOKEN_PATH = HERMES_HOME / "google_token.json"
-CLIENT_SECRET_PATH = HERMES_HOME / "google_client_secret.json"
-PENDING_AUTH_PATH = HERMES_HOME / "google_oauth_pending.json"
+GOOGLE_CREDENTIALS_HOME = get_google_credentials_home()
+TOKEN_PATH = GOOGLE_CREDENTIALS_HOME / "google_token.json"
+CLIENT_SECRET_PATH = GOOGLE_CREDENTIALS_HOME / "google_client_secret.json"
+PENDING_AUTH_PATH = GOOGLE_CREDENTIALS_HOME / "google_oauth_pending.json"
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -53,6 +53,9 @@ SCOPES = [
     "https://www.googleapis.com/auth/contacts.readonly",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/tasks",
+    "https://www.googleapis.com/auth/photospicker.mediaitems.readonly",
+    "https://www.googleapis.com/auth/photoslibrary.appendonly",
 ]
 
 # Exact pins: keep in sync with pyproject.toml [project.optional-dependencies].google
@@ -303,12 +306,14 @@ def store_client_secret(path: str):
         print("Download the correct file from: https://console.cloud.google.com/apis/credentials")
         sys.exit(1)
 
+    GOOGLE_CREDENTIALS_HOME.mkdir(parents=True, exist_ok=True)
     CLIENT_SECRET_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
     print(f"OK: Client secret saved to {CLIENT_SECRET_PATH}")
 
 
 def _save_pending_auth(*, state: str, code_verifier: str):
     """Persist the OAuth session bits needed for a later token exchange."""
+    GOOGLE_CREDENTIALS_HOME.mkdir(parents=True, exist_ok=True)
     PENDING_AUTH_PATH.write_text(
         json.dumps(
             {
@@ -443,10 +448,11 @@ def exchange_auth_code(code: str):
         print(f"WARNING: Token missing some Google Workspace scopes: {', '.join(missing_scopes)}")
         print("Some services may not be available.")
 
+    GOOGLE_CREDENTIALS_HOME.mkdir(parents=True, exist_ok=True)
     TOKEN_PATH.write_text(json.dumps(token_payload, indent=2), encoding="utf-8")
     PENDING_AUTH_PATH.unlink(missing_ok=True)
     print(f"OK: Authenticated. Token saved to {TOKEN_PATH}")
-    print(f"Profile-scoped token location: {display_hermes_home()}/google_token.json")
+    print(f"Google credentials location: {display_google_credentials_home()}/google_token.json")
 
 
 def revoke():

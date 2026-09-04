@@ -71,3 +71,117 @@ class TestGoogleWorkspaceCredentialFiles:
         finally:
             clear_credential_files()
 
+    def test_shared_google_credentials_home_from_profile_env_is_registered(self, tmp_path):
+        profile_home = tmp_path / ".hermes" / "profiles" / "agent-a"
+        shared_home = tmp_path / ".hermes" / "google-shared"
+        profile_home.mkdir(parents=True)
+        shared_home.mkdir(parents=True)
+        (profile_home / ".env").write_text(
+            f"HERMES_GOOGLE_CREDENTIALS_HOME={shared_home}\n",
+            encoding="utf-8",
+        )
+        (shared_home / "google_token.json").write_text("{}")
+        (shared_home / "google_client_secret.json").write_text("{}")
+
+        from tools.credential_files import (
+            clear_credential_files,
+            get_credential_file_mounts,
+            register_credential_files,
+        )
+
+        clear_credential_files()
+        try:
+            content = SKILL_MD.read_text(encoding="utf-8")
+            fm = _parse_frontmatter(content)
+            entries = fm.get("required_credential_files", [])
+
+            with patch.dict(os.environ, {"HERMES_HOME": str(profile_home)}, clear=False):
+                os.environ.pop("HERMES_GOOGLE_CREDENTIALS_HOME", None)
+                missing = register_credential_files(entries)
+
+            assert missing == []
+            mounts = get_credential_file_mounts()
+            by_container = {m["container_path"]: m["host_path"] for m in mounts}
+            assert by_container["/root/.hermes/google_token.json"] == str(
+                shared_home / "google_token.json"
+            )
+            assert by_container["/root/.hermes/google_client_secret.json"] == str(
+                shared_home / "google_client_secret.json"
+            )
+        finally:
+            clear_credential_files()
+
+    def test_config_credential_files_use_shared_google_home_from_profile_env(self, tmp_path, monkeypatch):
+        profile_home = tmp_path / ".hermes" / "profiles" / "agent-a"
+        shared_home = tmp_path / ".hermes" / "google-shared"
+        profile_home.mkdir(parents=True)
+        shared_home.mkdir(parents=True)
+        (profile_home / ".env").write_text(
+            f"HERMES_GOOGLE_CREDENTIALS_HOME={shared_home}\n",
+            encoding="utf-8",
+        )
+        (shared_home / "google_token.json").write_text("{}")
+        (shared_home / "google_client_secret.json").write_text("{}")
+
+        import hermes_cli.config as hermes_config
+        import tools.credential_files as credential_files
+
+        monkeypatch.setattr(
+            hermes_config,
+            "read_raw_config",
+            lambda: {
+                "terminal": {
+                    "credential_files": [
+                        "google_token.json",
+                        "google_client_secret.json",
+                    ]
+                }
+            },
+        )
+        monkeypatch.setattr(credential_files, "_config_files", None)
+
+        credential_files.clear_credential_files()
+        try:
+            with patch.dict(os.environ, {"HERMES_HOME": str(profile_home)}, clear=False):
+                os.environ.pop("HERMES_GOOGLE_CREDENTIALS_HOME", None)
+                mounts = credential_files.get_credential_file_mounts()
+
+            by_container = {m["container_path"]: m["host_path"] for m in mounts}
+            assert by_container["/root/.hermes/google_token.json"] == str(
+                shared_home / "google_token.json"
+            )
+            assert by_container["/root/.hermes/google_client_secret.json"] == str(
+                shared_home / "google_client_secret.json"
+            )
+        finally:
+            credential_files.clear_credential_files()
+            credential_files._config_files = None
+
+    def test_missing_token_is_reported(self, tmp_path):
+        """google_token.json absent (first-time setup) — reported as missing, client secret still mounts."""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        (hermes_home / "google_client_secret.json").write_text("{}")
+
+        from tools.credential_files import (
+            clear_credential_files,
+            get_credential_file_mounts,
+            register_credential_files,
+        )
+
+        clear_credential_files()
+        try:
+            content = SKILL_MD.read_text(encoding="utf-8")
+            fm = _parse_frontmatter(content)
+            entries = fm.get("required_credential_files", [])
+
+            with patch.dict(os.environ, {"HERMES_HOME": str(hermes_home)}):
+                missing = register_credential_files(entries)
+
+            assert "google_token.json" in missing
+            mounts = get_credential_file_mounts()
+            container_paths = {m["container_path"] for m in mounts}
+            assert "/root/.hermes/google_client_secret.json" in container_paths
+            assert "/root/.hermes/google_token.json" not in container_paths
+        finally:
+            clear_credential_files()

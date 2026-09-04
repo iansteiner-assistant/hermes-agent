@@ -40,3 +40,37 @@ except (ModuleNotFoundError, ImportError):
             return "~/" + home.relative_to(Path.home()).as_posix()
         except ValueError:
             return str(home)
+
+
+def get_google_credentials_home() -> Path:
+    """Return the directory that stores Google Workspace OAuth files.
+
+    Defaults to the active Hermes home, but can be shared across profiles with
+    HERMES_GOOGLE_CREDENTIALS_HOME=/path/to/shared/dir. Standalone skill
+    subprocesses may not have loaded .env, so also read the active profile's
+    .env directly.
+    """
+    val = os.environ.get("HERMES_GOOGLE_CREDENTIALS_HOME", "").strip()
+    if not val:
+        env_file = get_hermes_home() / ".env"
+        try:
+            for line in env_file.read_text(encoding="utf-8-sig").splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                key, raw_value = stripped.split("=", 1)
+                if key.strip() != "HERMES_GOOGLE_CREDENTIALS_HOME":
+                    continue
+                val = raw_value.strip().strip("'\"")
+                break
+        except OSError:
+            val = ""
+    return Path(val).expanduser() if val else get_hermes_home()
+
+
+def display_google_credentials_home() -> str:
+    home = get_google_credentials_home()
+    try:
+        return "~/" + str(home.relative_to(Path.home()))
+    except ValueError:
+        return str(home)

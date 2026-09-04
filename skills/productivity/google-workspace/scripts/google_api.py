@@ -36,11 +36,11 @@ _SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
-from _hermes_home import get_hermes_home
+from _hermes_home import get_google_credentials_home
 
-HERMES_HOME = get_hermes_home()
-TOKEN_PATH = HERMES_HOME / "google_token.json"
-CLIENT_SECRET_PATH = HERMES_HOME / "google_client_secret.json"
+GOOGLE_CREDENTIALS_HOME = get_google_credentials_home()
+TOKEN_PATH = GOOGLE_CREDENTIALS_HOME / "google_token.json"
+CLIENT_SECRET_PATH = GOOGLE_CREDENTIALS_HOME / "google_client_secret.json"
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -51,6 +51,9 @@ SCOPES = [
     "https://www.googleapis.com/auth/contacts.readonly",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/tasks",
+    "https://www.googleapis.com/auth/photospicker.mediaitems.readonly",
+    "https://www.googleapis.com/auth/photoslibrary.appendonly",
 ]
 
 

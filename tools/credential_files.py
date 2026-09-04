@@ -46,6 +46,43 @@ def _mount(host_path: Path | str, container_path: str) -> Dict[str, str]:
     return {"host_path": str(host_path), "container_path": container_path}
 
 
+_SHARED_GOOGLE_CREDENTIAL_FILES = frozenset({
+    "google_token.json",
+    "google_client_secret.json",
+})
+
+
+def _google_credentials_home_from_env(hermes_home: Path) -> Optional[Path]:
+    """Resolve the optional shared Google credential directory for a profile.
+
+    Standalone skill subprocesses do not always preload the profile ``.env``,
+    so consult that file when the process environment does not carry the
+    setting. Only the two declared Google OAuth files use this alternate root.
+    """
+    value = os.getenv("HERMES_GOOGLE_CREDENTIALS_HOME", "").strip()
+    if not value:
+        try:
+            for line in (hermes_home / ".env").read_text(encoding="utf-8-sig").splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                key, raw_value = stripped.split("=", 1)
+                if key.strip() == "HERMES_GOOGLE_CREDENTIALS_HOME":
+                    value = raw_value.strip().strip("'\"")
+                    break
+        except OSError:
+            return None
+    return Path(value).expanduser() if value else None
+
+
+def _credential_containment_root(relative_path: str, hermes_home: Path) -> Path:
+    if relative_path in _SHARED_GOOGLE_CREDENTIAL_FILES:
+        shared_home = _google_credentials_home_from_env(hermes_home)
+        if shared_home is not None:
+            return shared_home
+    return hermes_home
+
+
 def _contained_host_path(rel: str, hermes_home: Path, abs_msg: str, traversal_msg: str) -> Optional[Path]:
     """Resolve *rel* under HERMES_HOME, refusing absolute paths and escapes."""
     if os.path.isabs(rel):
@@ -68,8 +105,10 @@ def register_credential_file(relative_path: str, container_base: str = "/root/.h
     which are refused via the canonical read deny-list so the mount surface cannot hand a
     skill what the read surface denies. Fails CLOSED (logged) if the guard is unavailable or raises.
     """
+    hermes_home = get_hermes_home()
+    containment_root = _credential_containment_root(relative_path, hermes_home)
     resolved = _contained_host_path(
-        relative_path, get_hermes_home(),
+        relative_path, containment_root,
         "credential_files: rejected absolute path %r (must be relative to HERMES_HOME)",
         "credential_files: rejected path traversal %r (%s)")
     if resolved is None:
@@ -132,8 +171,9 @@ def _load_config_files() -> List[Dict[str, str]]:
             rel = item.strip() if isinstance(item, str) else ""
             if not rel:
                 continue
+            containment_root = _credential_containment_root(rel, hermes_home)
             resolved_path = _contained_host_path(
-                rel, hermes_home,
+                rel, containment_root,
                 "credential_files: rejected absolute config path %r",
                 "credential_files: rejected config path traversal %r (%s)")
             if resolved_path is not None and resolved_path.is_file():
