@@ -47,6 +47,12 @@ def test_default_config_is_soft_warning_only_with_hard_stop_disabled():
     assert cfg.no_progress_block_after == 5
 
 
+def test_successful_result_with_zero_failed_count_is_not_a_guardrail_failure():
+    result = json.dumps({"ok": True, "failed": 0, "fetched": 5})
+
+    assert classify_tool_failure("fitness_refresh_morning", result) == (False, "")
+
+
 def test_config_parses_nested_warn_and_hard_stop_thresholds():
     cfg = ToolCallGuardrailConfig.from_mapping(
         {

@@ -38,3 +38,24 @@ def file_mutation_result_landed(tool_name: str, result: Any) -> bool:
     if tool_name == "patch":
         return data.get("success") is True
     return False
+
+
+def structured_result_failed(data: Any) -> bool:
+    """Return True when a parsed result object carries a failure value.
+
+    Inspect values instead of scanning serialized JSON keys: count-bearing
+    payloads commonly include successful fields such as ``"failed": 0``.
+    """
+    if not isinstance(data, dict):
+        return False
+    if data.get("error"):
+        return True
+    if data.get("success") is False or data.get("ok") is False:
+        return True
+
+    failed = data.get("failed")
+    if isinstance(failed, bool):
+        return failed
+    if isinstance(failed, (int, float)):
+        return failed != 0
+    return False

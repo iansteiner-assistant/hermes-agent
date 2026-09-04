@@ -308,6 +308,34 @@ class DuplicateNativeToolsAgent:
         return {"final_response": "done", "messages": [], "api_calls": 1}
 
 
+class SuccessfulFitnessRefreshAgent:
+    def __init__(self, **kwargs):
+        self.tool_start_callback = kwargs.get("tool_start_callback")
+        self.tool_complete_callback = kwargs.get("tool_complete_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        call_id = "call-refresh"
+        tool_name = "fitness_refresh_morning"
+        self.tool_start_callback(call_id, tool_name, {"if_stale_minutes": 15})
+        self.tool_complete_callback(
+            call_id,
+            tool_name,
+            {"if_stale_minutes": 15},
+            (
+                '{"changed": 2, "date_from": "2026-08-28", '
+                '"date_through": "2026-08-28", "dates_attempted": 1, '
+                '"delay_seconds": 10.0, "failed": 0, "fetched": 5, '
+                '"freshness_skipped": false, "metrics": 33, '
+                '"network_attempted": true, "ok": true, "processed": 0, '
+                '"profile": "morning", "rate_limited": false, "sessions": 0, '
+                '"skipped": 0, "source": "garmin", "stopped_at": null, '
+                '"unchanged": 3}'
+            ),
+        )
+        return {"final_response": "done", "messages": [], "api_calls": 1}
+
+
 class ThinkingAgent:
     """Agent that emits _thinking scratch text (no tool calls).
 
@@ -1100,6 +1128,63 @@ async def test_slack_native_progress_correlates_concurrent_duplicate_tools_by_id
         },
     ]
     assert adapter.sent == []
+    assert adapter.native_stops == 1
+
+
+@pytest.mark.asyncio
+async def test_slack_native_progress_renders_successful_fitness_refresh_complete(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        SuccessfulFitnessRefreshAgent,
+        session_id="sess-native-fitness-refresh",
+        config_data={
+            "display": {"platforms": {"slack": {"tool_progress": "off"}}}
+        },
+        platform=Platform.SLACK,
+        chat_id="C1",
+        thread_id="thread-1",
+        adapter_cls=NativeTaskCardAdapter,
+        user_id="U1",
+        scope_id="T1",
+    )
+
+    assert result["final_response"] == "done"
+    assert adapter.native_updates[-1]["tasks"] == [
+        {
+            "id": "call-refresh",
+            "title": "fitness_refresh_morning",
+            "status": "complete",
+        }
+    ]
+    assert adapter.sent == []
+    assert adapter.native_stops == 1
+
+
+@pytest.mark.asyncio
+async def test_slack_fallback_progress_renders_successful_fitness_refresh_complete(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        SuccessfulFitnessRefreshAgent,
+        session_id="sess-fallback-fitness-refresh",
+        platform=Platform.SLACK,
+        chat_id="C1",
+        thread_id="thread-1",
+        adapter_cls=FailingNativeTaskCardAdapter,
+        user_id="U1",
+        scope_id="T1",
+    )
+
+    assert result["final_response"] == "done"
+    final_trace = (adapter.edits or adapter.sent)[-1]["content"]
+    assert final_trace.endswith(
+        "fitness_refresh_morning - complete"
+    )
     assert adapter.native_stops == 1
 
 

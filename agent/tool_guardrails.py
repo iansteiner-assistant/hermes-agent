@@ -13,7 +13,10 @@ from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Mapping
 
 from utils import safe_json_loads
-from agent.tool_result_classification import file_mutation_result_landed
+from agent.tool_result_classification import (
+    file_mutation_result_landed,
+    structured_result_failed,
+)
 
 
 IDEMPOTENT_TOOL_NAMES = frozenset({
@@ -209,15 +212,25 @@ def classify_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str
     if result is None or file_mutation_result_landed(tool_name, result):
         return False, ""
 
+    data = safe_json_loads(result)
+
     if tool_name == "terminal":
-        data = safe_json_loads(result)
-        exit_code = data.get("exit_code") if isinstance(data, dict) else None
-        return (True, f" [exit {exit_code}]") if exit_code is not None and exit_code != 0 else (False, "")
+        if isinstance(data, dict):
+            exit_code = data.get("exit_code")
+            if exit_code is not None and exit_code != 0:
+                return True, f" [exit {exit_code}]"
+        return False, ""
 
     if tool_name == "memory":
-        data = safe_json_loads(result)
-        if isinstance(data, dict) and data.get("success") is False and "exceed the limit" in data.get("error", ""):
-            return True, " [full]"
+        if isinstance(data, dict):
+            if data.get("success") is False and "exceed the limit" in data.get("error", ""):
+                return True, " [full]"
+
+    if isinstance(data, dict):
+        if structured_result_failed(data):
+            return True, " [error]"
+        return False, ""
+
     lower = result[:500].lower()
     return (True, " [error]") if '"error"' in lower or '"failed"' in lower or result.startswith("Error") else (False, "")
 

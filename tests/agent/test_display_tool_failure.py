@@ -96,6 +96,10 @@ class TestDetectToolFailureStructured:
         result = json.dumps({"success": True, "data": "hello"})
         assert _detect_tool_failure("web_search", result) == (False, "")
 
+    def test_successful_result_with_zero_failed_count_not_flagged(self):
+        result = json.dumps({"ok": True, "failed": 0, "fetched": 5})
+        assert _detect_tool_failure("fitness_refresh_morning", result) == (False, "")
+
 
 
 class TestGetCuteToolMessageFailureSuffix:
@@ -118,4 +122,3 @@ class TestGetCuteToolMessageFailureSuffix:
         ok = json.dumps({"success": True, "data": "hi"})
         line = get_cute_tool_message("web_search", {"query": "hi"}, 0.2, result=ok)
         assert "[" not in line.split("0.2s", 1)[1]
-

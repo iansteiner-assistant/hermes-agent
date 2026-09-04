@@ -17,7 +17,10 @@ from urllib.parse import urlsplit
 
 from utils import safe_json_loads
 from agent.redact import redact_sensitive_text
-from agent.tool_result_classification import file_mutation_result_landed
+from agent.tool_result_classification import (
+    file_mutation_result_landed,
+    structured_result_failed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -924,10 +927,17 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
         err = data.get("error") or data.get("message")
         if err and (failed or "error" in data):
             return True, f" [{_trim_error(str(err))}]"
-    # Multimodal results (dicts) are successes; failures arrive as JSON-encoded strings.
-    if isinstance(result, str) and (
-        '"error"' in result[:500].lower() or '"failed"' in result[:500].lower() or result.startswith("Error")
-    ):
+        if structured_result_failed(data):
+            return True, " [error]"
+        return False, ""
+
+    # Generic heuristic for non-terminal, non-JSON tool results.
+    # Multimodal tool results (dicts with _multimodal=True) are not strings —
+    # treat them as successes since failures would be JSON-encoded strings.
+    if not isinstance(result, str):
+        return False, ""
+    lower = result[:500].lower()
+    if '"error"' in lower or '"failed"' in lower or result.startswith("Error"):
         return True, " [error]"
     return False, ""
 
