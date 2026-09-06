@@ -143,6 +143,38 @@ def test_profile_omitting_keys_gets_defaults_not_launch_values(tmp_path):
     assert json.loads(os.environ["TERMINAL_DOCKER_VOLUMES"])  # A unchanged
 
 
+def test_profile_scope_json_encodes_structured_terminal_values(tmp_path):
+    """Cron/profile scopes must use the same JSON wire format as the legacy env bridge."""
+    import tools.terminal_tool as tt
+
+    home = _profile(
+        tmp_path,
+        "docker-json",
+        """terminal:
+  backend: docker
+  docker_volumes:
+    - /host/data:/workspace/data
+  docker_env:
+    MODE: cron
+  docker_forward_env:
+    - TZ
+""",
+    )
+    token = install_profile_terminal_scope(home)
+    try:
+        assert json.loads(terminal_env("TERMINAL_DOCKER_VOLUMES")) == [
+            "/host/data:/workspace/data"
+        ]
+        assert json.loads(terminal_env("TERMINAL_DOCKER_ENV")) == {"MODE": "cron"}
+        assert json.loads(terminal_env("TERMINAL_DOCKER_FORWARD_ENV")) == ["TZ"]
+        cfg = tt._get_env_config()
+        assert cfg["docker_volumes"] == ["/host/data:/workspace/data"]
+        assert cfg["docker_env"] == {"MODE": "cron"}
+        assert cfg["docker_forward_env"] == ["TZ"]
+    finally:
+        reset_terminal_scope(token)
+
+
 def test_malformed_profile_config_refuses_execution(tmp_path):
     """Unresolvable policy → refusal scope; terminal_tool refuses instead of
     running under the launch process's ambient policy (fail closed)."""

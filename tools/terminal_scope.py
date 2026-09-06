@@ -10,6 +10,7 @@ profile's COMPLETE ``TERMINAL_*`` policy; while bound, ``terminal_env`` resolves
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from contextlib import contextmanager
@@ -106,7 +107,11 @@ def build_profile_terminal_scope(hermes_home: "Any") -> Dict[str, str]:
                 continue
             env_var = TERMINAL_CONFIG_ENV_MAP.get(cfg_key)
             if env_var:
-                scope[env_var] = str(value)
+                # terminal_tool parses structured TERMINAL_* values as JSON.  str(list/dict)
+                # emits Python literals (single quotes), which made scoped cron/gateway turns
+                # fail their terminal requirements check even though the same config worked
+                # through the process-env bridge.
+                scope[env_var] = json.dumps(value) if isinstance(value, (list, dict)) else str(value)
 
     _apply({**_TOOL_LEVEL_DEFAULTS, **(DEFAULT_CONFIG.get("terminal") or {})})
     env_path = home / ".env"
