@@ -41,6 +41,9 @@ _DOCKER_SEARCH_PATHS = [
 
 _docker_executable: Optional[str] = None  # resolved once, cached
 _ENV_VAR_NAME_RE = _SHELL_ENV_NAME_RE
+_CREDENTIAL_MOUNTS_LABEL_KEY = "hermes-credential-mounts"
+_SANDBOX_HOME = "/root"
+_SANDBOX_HERMES_HOME = "/root/.hermes"
 
 
 def _normalize_forward_env_names(forward_env: list[str] | None) -> list[str]:
@@ -191,6 +194,31 @@ def _desired_credential_bind_mounts() -> Optional[dict[str, tuple[str, bool]]]:
     except Exception as exc:
         logger.debug("Could not resolve current credential mounts: %s", exc)
         return None
+
+
+def _credential_bind_mount_fingerprint() -> Optional[str]:
+    """Fingerprint credential source identities without hashing credential contents.
+
+    A read-only bind mount of a single file remains attached to its original
+    inode when the host atomically replaces that file. Including device/inode
+    identity in the reusable-container label lets Hermes discard containers
+    whose credential view has become stale after an OAuth refresh.
+    """
+    mounts = _desired_credential_bind_mounts()
+    if mounts is None:
+        return None
+    identities: list[tuple[str, str, bool, int, int]] = []
+    try:
+        for destination, (source, writable) in sorted(mounts.items()):
+            stat_result = os.stat(source)
+            identities.append(
+                (destination, source, writable, stat_result.st_dev, stat_result.st_ino)
+            )
+    except OSError as exc:
+        logger.debug("Could not fingerprint credential bind mounts: %s", exc)
+        return None
+    payload = json.dumps(identities, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def reap_orphan_containers(
@@ -567,6 +595,12 @@ class DockerEnvironment(BaseEnvironment):
         self._task_id = task_id
         self._forward_env = _normalize_forward_env_names(forward_env)
         self._env = _normalize_env_dict(env)
+        # Credential files and skills are mounted beneath /root/.hermes even
+        # when the container runs as the host uid. Images without a passwd
+        # entry for that uid otherwise report HOME=/, which makes
+        # Path.home()/".hermes" resolve to the wrong directory.
+        self._env.setdefault("HOME", _SANDBOX_HOME)
+        self._env.setdefault("HERMES_HOME", _SANDBOX_HERMES_HOME)
         self._init_unset_passthrough_names: tuple[str, ...] = ()
         self._container_id: Optional[str] = None
         self._init_env_values: dict[str, str] = {}
@@ -617,11 +651,13 @@ class DockerEnvironment(BaseEnvironment):
         # creation, so reusing a pre-egress container would bypass the firewall.
         profile_name = _container_identity(shared_container_key)
         task_label = _sanitize_label_value(task_id)
+        credential_fingerprint = _credential_bind_mount_fingerprint()
         self._labels = {
             "hermes-agent": "1",
             "hermes-task-id": task_label,
             "hermes-profile": profile_name,
-            _EGRESS_LABEL_KEY: egress_label}
+            _EGRESS_LABEL_KEY: egress_label,
+            _CREDENTIAL_MOUNTS_LABEL_KEY: credential_fingerprint or "unavailable"}
         # Saved for container recreation on "No such container" recovery.
         self._image = image
         self._image_uses_s6_init = image_uses_s6_init
@@ -1039,6 +1075,18 @@ class DockerEnvironment(BaseEnvironment):
                 mounts[destination] = (_normalize_bind_source(source), bool(entry.get("RW", True)))
         return mounts
 
+    def _inspect_credential_mount_fingerprint(self, container_id: str) -> Optional[str]:
+        """Return the immutable credential-inode fingerprint stored at creation."""
+        template = '{{ index .Config.Labels "' + _CREDENTIAL_MOUNTS_LABEL_KEY + '" }}'
+        result = _docker_query(
+            [self._docker_exe, "inspect", "--format", template, container_id], timeout=10,
+            fail="docker inspect credential label failed: %s",
+            nonzero="docker inspect credential label returned %d: %s")
+        if result is None:
+            return None
+        value = result.stdout.strip()
+        return None if value in {"", "<no value>", "unavailable"} else value
+
     def _container_mounts_match_run_args(self, container_id: str) -> bool:
         desired = _desired_credential_bind_mounts()
         if desired is None:
@@ -1054,6 +1102,13 @@ class DockerEnvironment(BaseEnvironment):
                     "Reusable container %s has a missing or stale bind mount for %s",
                     container_id[:12], destination)
                 return False
+        expected_fingerprint = _credential_bind_mount_fingerprint()
+        actual_fingerprint = self._inspect_credential_mount_fingerprint(container_id)
+        if expected_fingerprint is None or actual_fingerprint != expected_fingerprint:
+            logger.info(
+                "Reusable container %s has stale credential file identities",
+                container_id[:12])
+            return False
         return True
 
     def current_credential_mounts_satisfied(self) -> bool:
@@ -1066,7 +1121,11 @@ class DockerEnvironment(BaseEnvironment):
         if not desired:
             return True
         existing = self._inspect_bind_mounts(self._container_id)
-        return existing is not None and all(existing.get(dst) == expected for dst, expected in desired.items())
+        if existing is None or not all(existing.get(dst) == expected for dst, expected in desired.items()):
+            return False
+        expected_fingerprint = _credential_bind_mount_fingerprint()
+        actual_fingerprint = self._inspect_credential_mount_fingerprint(self._container_id)
+        return expected_fingerprint is not None and actual_fingerprint == expected_fingerprint
 
     def _remove_stale_reusable_container(self, container_id: str) -> None:
         try:

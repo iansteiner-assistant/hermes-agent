@@ -1,7 +1,7 @@
 ---
 name: google-workspace
 description: "Gmail, Calendar, Drive, Docs, Sheets via gws CLI or Python."
-version: 1.2.0
+version: 1.2.2
 author: Nous Research
 license: MIT
 platforms: [linux, macos, windows]
@@ -255,6 +255,25 @@ $GAPI drive delete FILE_ID --permanent
 ```bash
 $GAPI contacts list --max 20
 ```
+
+### Google Tasks
+
+Prefer the registered Google Tasks MCP tools. Hermes prefixes MCP wire names
+with `mcp__<server>__`; search semantically for `Google Tasks create task` or
+by the `google_tasks_create_task` substring, then call the exact discovered
+name (normally `mcp__google_tasks__google_tasks_create_task`). Retain its
+returned task ID and verify that exact record with the corresponding get
+operation (normally `mcp__google_tasks__google_tasks_get_task`) before using a
+REST fallback.
+
+When a direct REST fallback is genuinely required, Hermes mounts the OAuth
+files at `/root/.hermes/google_token.json` and
+`/root/.hermes/google_client_secret.json` in Docker. Do not assume
+`Path.home() / ".hermes"` points there because host-user containers can have
+`HOME=/`. Resolve an explicit `HERMES_GOOGLE_CREDENTIALS_HOME` first, then
+probe `/root/.hermes`, refresh the access token in memory, create the task, and
+verify the exact returned ID. Do not attempt to write the read-only mounted
+token file.
 
 ### Sheets
 

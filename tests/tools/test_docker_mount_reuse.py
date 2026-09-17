@@ -6,6 +6,7 @@ import tools.environments.docker as docker_module
 import tools.terminal_tool as terminal_tool
 from tools.environments.docker import (
     DockerEnvironment,
+    _credential_bind_mount_fingerprint,
     _desired_bind_mounts_from_run_args,
 )
 
@@ -25,6 +26,28 @@ def test_desired_bind_mounts_parse_readonly_credentials() -> None:
         False,
     )
     assert mounts["/workspace"] == ("/tmp/work", True)
+
+
+def test_credential_fingerprint_changes_after_atomic_replacement(monkeypatch, tmp_path) -> None:
+    token = tmp_path / "google_token.json"
+    token.write_text("old", encoding="utf-8")
+    monkeypatch.setattr(
+        "tools.credential_files.get_credential_file_mounts",
+        lambda: [{
+            "host_path": str(token),
+            "container_path": "/root/.hermes/google_token.json",
+        }],
+    )
+
+    before = _credential_bind_mount_fingerprint()
+    replacement = tmp_path / ".google_token.tmp"
+    replacement.write_text("new", encoding="utf-8")
+    replacement.replace(token)
+    after = _credential_bind_mount_fingerprint()
+
+    assert before is not None
+    assert after is not None
+    assert before != after
 
 
 def test_reusable_container_rejected_when_credential_mount_source_drifted(monkeypatch) -> None:
@@ -79,6 +102,9 @@ def test_reusable_container_accepted_when_required_mounts_match(monkeypatch) -> 
             )
         },
     )
+    fingerprint = "a" * 64
+    monkeypatch.setattr(docker_module, "_credential_bind_mount_fingerprint", lambda: fingerprint)
+    monkeypatch.setattr(env, "_inspect_credential_mount_fingerprint", lambda _container_id: fingerprint)
 
     assert env._container_mounts_match_run_args("abc123") is True
 
@@ -124,8 +150,34 @@ def test_current_credential_mounts_accepts_current_skill_mount(monkeypatch) -> N
             )
         },
     )
+    fingerprint = "b" * 64
+    monkeypatch.setattr(docker_module, "_credential_bind_mount_fingerprint", lambda: fingerprint)
+    monkeypatch.setattr(env, "_inspect_credential_mount_fingerprint", lambda _container_id: fingerprint)
 
     assert env.current_credential_mounts_satisfied() is True
+
+
+def test_current_credential_mounts_rejects_replaced_source_inode(monkeypatch) -> None:
+    env = object.__new__(DockerEnvironment)
+    env._container_id = "abc123"
+    monkeypatch.setattr(
+        "tools.credential_files.get_credential_file_mounts",
+        lambda: [{
+            "host_path": "/new/token",
+            "container_path": "/root/.hermes/google_token.json",
+        }],
+    )
+    monkeypatch.setattr(
+        env,
+        "_inspect_bind_mounts",
+        lambda _container_id: {
+            "/root/.hermes/google_token.json": ("/new/token", False),
+        },
+    )
+    monkeypatch.setattr(docker_module, "_credential_bind_mount_fingerprint", lambda: "new-inode")
+    monkeypatch.setattr(env, "_inspect_credential_mount_fingerprint", lambda _container_id: "old-inode")
+
+    assert env.current_credential_mounts_satisfied() is False
 
 
 def test_reuse_discards_stale_candidate_before_accepting_current_one(monkeypatch) -> None:

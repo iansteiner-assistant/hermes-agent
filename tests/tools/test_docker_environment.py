@@ -395,6 +395,8 @@ def test_docker_env_appears_in_run_command(monkeypatch):
     client_env = run_kwargs.get("env") or {}
     assert client_env.get("SSH_AUTH_SOCK") == "/run/user/1000/ssh-agent.sock"
     assert client_env.get("GNUPGHOME") == "/root/.gnupg"
+    assert client_env.get("HOME") == "/root"
+    assert client_env.get("HERMES_HOME") == "/root/.hermes"
 
 
 def _node_options_from_run(calls):
@@ -728,12 +730,15 @@ def test_labels_attribute_populated_after_init(monkeypatch):
 
     env = _make_dummy_env(task_id="abc")
 
-    assert env._labels == {
+    assert {k: env._labels[k] for k in (
+        "hermes-agent", "hermes-task-id", "hermes-profile", "hermes-egress"
+    )} == {
         "hermes-agent": "1",
         "hermes-task-id": "abc",
         "hermes-profile": "default",
         "hermes-egress": "off",
     }
+    assert len(env._labels["hermes-credential-mounts"]) == 64
 
 
 def test_shared_container_key_replaces_profile_identity(monkeypatch):
