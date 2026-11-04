@@ -134,7 +134,7 @@ def release_session_backend(cache_key: str, session_info: dict[str, Any]) -> Non
         from tools.browser_lightpanda import stop_lightpanda
         stop_lightpanda(session_info.get("session_name", ""))
     launcher_key = session_info.get("launcher_key")
-    if not launcher_key or _launcher_key_in_use(launcher_key, session_info):
+    if not launcher_key or (not features.get("sandbox") and _launcher_key_in_use(launcher_key, session_info)):
         return  # nothing launched for it, or a shared browser another live session still uses
     if features.get("sandbox"):
         from tools.browser_session_sandbox import stop_sandbox_browser

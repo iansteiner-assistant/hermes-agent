@@ -1,4 +1,5 @@
 import logging
+import contextlib
 import os
 import re
 from io import StringIO
@@ -21,6 +22,9 @@ def _mock_subprocess_run(monkeypatch):
     captured call list — these tests inspect the real sandbox-start ``run``.
     Tests that exercise the probe itself live in test_docker_cgroup_limits.py.
     """
+    from tools import browser_sandbox_lifecycle
+    monkeypatch.setattr(browser_sandbox_lifecycle, "container_stop_guard", lambda *a: contextlib.nullcontext())
+    monkeypatch.setattr(browser_sandbox_lifecycle, "registered_container_guard", lambda *a: contextlib.nullcontext())
     docker_env._cgroup_limits_ok = True
     calls = []
 

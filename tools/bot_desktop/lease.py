@@ -173,7 +173,7 @@ def _notify(key: str, lease: Lease) -> None:
             pass
 
 
-def _transition(profile_key: Optional[str], mutate: Callable[[Lease], bool]) -> Lease:
+def _transition(profile_key: Optional[str], mutate: Callable[[Lease], bool], *, deferred=None) -> Lease:
     key, path = hermes_home_key(profile_key) if profile_key else hermes_home_key(), _path(profile_key)
     with _locked(path):
         lease = _read(path)
@@ -181,10 +181,17 @@ def _transition(profile_key: Optional[str], mutate: Callable[[Lease], bool]) -> 
             return lease
         lease.epoch += 1
         _write(path, lease)
+    if deferred is None:
+        _transition_notify(key, lease)
+    else:
+        deferred.append((key, lease))
+    return lease
+
+
+def _transition_notify(key: str, lease: Lease) -> None:
     with _lock:
         _lock.notify_all()
     _notify(key, lease)
-    return lease
 
 
 def acquire(viewer_id: str, *, profile_key: Optional[str] = None, reason: str = "") -> Lease:
@@ -198,7 +205,21 @@ def acquire(viewer_id: str, *, profile_key: Optional[str] = None, reason: str = 
         lease.holder, lease.viewer_id, lease.since = HUMAN, viewer_id, time.time()
         lease.reason = reason or ""
         return True
-    return _transition(profile_key, _m)
+    from tools.browser_sandbox_lifecycle import takeover_guard, live_holders
+    events = []
+    with takeover_guard(profile_key) as guard:
+        if guard is not None:
+            import hashlib
+            home = hermes_home_key(profile_key) if profile_key else hermes_home_key()
+            holders = live_holders(guard)
+            holders['human:' + hashlib.sha256(home.encode()).hexdigest()] = {'kind': 'human', 'home': home}
+            # Publish before the home lease while holding the shared-profile lock: another home sharing
+            # this browser can never miss an admitted human. A failed lease write leaves no human lease.
+            guard.command('holders', holders=holders)
+        result = _transition(profile_key, _m, deferred=events)
+    for key, changed in events:
+        _transition_notify(key, changed)
+    return result
 
 
 def release(viewer_id: Optional[str] = None, *, profile_key: Optional[str] = None,

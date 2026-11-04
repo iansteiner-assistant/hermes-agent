@@ -18,10 +18,16 @@ _SIGTERM_BIT = 1 << (signal.SIGTERM - 1)
 
 _STUB = textwrap.dedent("""\
     #!{python}
-    import os, signal, socket, sys, time
+    import os, signal, socket, sys, time, threading, json
     signal.pthread_sigmask(signal.SIG_BLOCK, {{signal.SIGTERM}})
     udd = next(a.split("=", 1)[1] for a in sys.argv if a.startswith("--user-data-dir="))
     s = socket.socket(); s.bind(("127.0.0.1", 0)); s.listen(8)
+    def serve():
+        while True:
+            c,_=s.accept();c.recv(4096)
+            body=json.dumps(dict(webSocketDebuggerUrl='ws://127.0.0.1/devtools/browser/stub')).encode()
+            c.sendall(b'HTTP/1.1 200 OK\\r\\nContent-Length: '+str(len(body)).encode()+b'\\r\\n\\r\\n'+body);c.close()
+    threading.Thread(target=serve,daemon=True).start()
     tmp = os.path.join(udd, "DevToolsActivePort.tmp")
     with open(tmp, "w") as f:
         f.write(f"{{s.getsockname()[1]}}\\n/devtools/browser/stub\\n")
@@ -88,7 +94,8 @@ def test_stop_signals_the_chromium_it_launched(local_sandbox, tmp_path):
     info = local_sandbox.create_sandbox_session("task-A")
     pid = _launched_pid(local_sandbox, info)
     try:
-        local_sandbox.stop_sandbox_browser(info)
+        with pytest.raises((RuntimeError, TimeoutError), match="did not exit|did not answer"):
+            local_sandbox.stop_sandbox_browser(info)
         assert _sigterm_pending(pid)
     finally:
         _kill_if_ours(pid, tmp_path)
@@ -108,10 +115,9 @@ def test_stop_leaves_alone_a_pid_that_now_names_another_process(local_sandbox, t
         assert job.stdout.readline().strip() == "ready"
         env, _pid, *identity = local_sandbox._launched[key]
         local_sandbox._launched[key] = (env, job.pid, *identity)
-        with caplog.at_level("INFO", logger="tools.browser_session_sandbox"):
+        with pytest.raises(RuntimeError, match="ownership changed"):
             local_sandbox.stop_sandbox_browser(info)
         assert not _sigterm_pending(job.pid), "an unrelated process on a reused pid was signalled"
-        assert str(job.pid) in caplog.text
     finally:
         job.kill()
         job.wait()

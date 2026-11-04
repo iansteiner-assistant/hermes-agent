@@ -248,3 +248,36 @@ Tool calls may execute sequentially or concurrently depending on the tool mix an
 - [Built-in Tools Reference](../reference/tools-reference.md)
 - [Agent Loop Internals](./agent-loop.md)
 - [ACP Internals](./acp-internals.md)
+
+
+## Sandbox browser lifecycle and readiness
+
+The sandbox Chromium launcher records its actual child PID/start-time/namespace and exit status through a
+small private helper, with at most 16KiB of stderr per launch and four retained launch records. Early child
+death is reported directly. A shell successfully detaching is not browser readiness. The agent and dock
+share one persistent profile and its lifecycle flock. Local Docker also retains a host flock keyed to the
+actual profile inode across container stop/replacement; known container restarts use the same mapping.
+A retirement marker blocks dock launch after the container-local lock holder exits, until old ownership
+is proved retired. Unknown ownership refuses recovery. No PID-only signal or blanket Chromium kill is used.
+
+`tools.browser_readiness.check_browser_readiness(task_id=..., timeout=45)` is an internal library callable
+for nightly and update acceptance. Bind the normal served-profile and terminal-task context first; the
+caller's task ID labels the browser check, not a new terminal container. The check uses native browser_exec
+on the actual configured sandbox/profile, creates one synthetic target, verifies JS/DOM and a bounded PNG,
+and closes only its own target. Its profile reservation excludes new attachments, dock launch and human
+takeover through cleanup. Existing owners return `deferred`; an existing idle browser is preserved. A
+check-created sole-owner browser must exit and release singleton links before `healthy` can be returned.
+The structured result includes `status`, `reason`, `checks`, `cleanup`, and private route identity. No
+provider inference, third-party portal or notification is part of this callable.
+
+A recorded foreign-container singleton can be quarantined once only when complete fresh local-rootless
+Docker/bind-mount/process/holder evidence proves that exact recorded owner absent. Only the three matching
+symlinks move, with a private metadata receipt; browser data is untouched. Unknown/legacy owners, other
+containers sharing the backing profile, live holders, network storage or incomplete evidence refuse repair.
+Quarantine is recovery evidence: do not restore old singleton links over a running browser.
+
+Focused tests use `scripts/run_tests.sh`. The explicit
+`tests/tools/browser_sandbox_docker_fixture.py --image EXISTING_IMAGE --root NEW_PRIVATE_DIRECTORY` fixture
+uses disposable labelled containers, network none, one new bind-backed profile and the already installed
+image. It verifies actual Chromium clean exit, foreign singleton failure/quarantine/retry, cross-container
+exclusion and a replacement-spanning restart fence. It never mounts production profiles or credentials.

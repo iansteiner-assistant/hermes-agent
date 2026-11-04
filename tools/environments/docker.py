@@ -965,7 +965,9 @@ class DockerEnvironment(BaseEnvironment):
                     "starting fresh (task=%s, profile=%s).",
                     container_id[:12], actual_image, self._image, task_label, profile_name)
                 try:
-                    run_capture([self._docker_exe, "rm", "-f", container_id], timeout=30)
+                    from tools.browser_sandbox_lifecycle import container_stop_guard
+                    with container_stop_guard(self, container_id):
+                        run_capture([self._docker_exe, "rm", "-f", container_id], timeout=30)
                 except (subprocess.TimeoutExpired, OSError) as e:
                     logger.warning("Failed to remove mismatched container %s: %s", container_id[:12], e)
                 return False
@@ -978,7 +980,9 @@ class DockerEnvironment(BaseEnvironment):
                     "container — removing it and starting fresh (task=%s, profile=%s).",
                     container_id[:12], actual_mode or "unknown", task_label, profile_name)
                 try:
-                    run_capture([self._docker_exe, "rm", "-f", container_id], timeout=30)
+                    from tools.browser_sandbox_lifecycle import container_stop_guard
+                    with container_stop_guard(self, container_id):
+                        run_capture([self._docker_exe, "rm", "-f", container_id], timeout=30)
                 except (subprocess.TimeoutExpired, OSError) as e:
                     logger.warning("Failed to remove mismatched container %s: %s", container_id[:12], e)
                 return False
@@ -1014,7 +1018,9 @@ class DockerEnvironment(BaseEnvironment):
     def _start_container(self, container_id: str) -> Exception | None:
         """``docker start`` a stopped container; returns the failure instead of raising."""
         try:
-            run_capture([self._docker_exe, "start", container_id], timeout=30, check=True)
+            from tools.browser_sandbox_lifecycle import registered_container_guard
+            with registered_container_guard(container_id):
+                run_capture([self._docker_exe, "start", container_id], timeout=30, check=True)
             return None
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             return e
@@ -1314,7 +1320,12 @@ class DockerEnvironment(BaseEnvironment):
             self._start_teardown(lambda: strip_sandbox_privileges(docker_exe, container_id), log_id)
             return
 
-        def _do_cleanup() -> None:
+        import contextvars
+        from tools.browser_sandbox_lifecycle import ContainerTarget
+        browser_env = ContainerTarget(self)
+        browser_context = contextvars.copy_context()
+
+        def _cleanup_container() -> None:
             for argv, fail_msg in ((["stop", "-t", "10"], "docker stop %s timed out / failed: %s"),
                                    (["rm", "-f"], "docker rm -f %s failed: %s")):
                 if argv[0] == "rm" and sandbox_mounts:  # stopped: no writer left, volumes still reachable
@@ -1326,13 +1337,20 @@ class DockerEnvironment(BaseEnvironment):
                 except (subprocess.TimeoutExpired, OSError) as e:
                     logger.warning(fail_msg, log_id, e)
 
-        self._start_teardown(_do_cleanup, log_id)
+        def _do_cleanup() -> None:
+            from tools.browser_sandbox_lifecycle import container_stop_guard
+            try:
+                with container_stop_guard(browser_env):
+                    _cleanup_container()
+                    if not self._persistent:
+                        self._remove_bind_dirs()
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                self._cleanup_error = exc
+                logger.error("Container teardown refused: %s", exc)
+
+        self._start_teardown(lambda: browser_context.run(_do_cleanup), log_id)
         self._container_id = None
 
-        # Bind-mount dirs are the container's filesystem state; only drop them
-        # once the container itself is removed.
-        if not self._persistent:
-            self._remove_bind_dirs()
 
     def stop_idle(self) -> None:
         """Idle reclaim of a per-workspace persistent container (#140665): ``docker stop``, never
@@ -1347,7 +1365,12 @@ class DockerEnvironment(BaseEnvironment):
             return
         docker_exe, log_id = self._docker_exe, container_id[:12]
 
-        def _do_stop() -> None:
+        import contextvars
+        from tools.browser_sandbox_lifecycle import ContainerTarget
+        browser_env = ContainerTarget(self)
+        browser_context = contextvars.copy_context()
+
+        def _stop_container() -> None:
             try:
                 subprocess.run([docker_exe, "stop", "-t", "10", container_id], capture_output=True,
                                timeout=30, stdin=subprocess.DEVNULL, check=False)
@@ -1355,7 +1378,16 @@ class DockerEnvironment(BaseEnvironment):
                 logger.warning("docker stop %s (idle workspace) failed: %s", log_id, e)
             strip_sandbox_privileges(docker_exe, container_id)
 
-        self._start_teardown(_do_stop, log_id)
+        def _do_stop() -> None:
+            from tools.browser_sandbox_lifecycle import container_stop_guard
+            try:
+                with container_stop_guard(browser_env):
+                    _stop_container()
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                self._cleanup_error = exc
+                logger.error("Idle container stop refused: %s", exc)
+
+        self._start_teardown(lambda: browser_context.run(_do_stop), log_id)
         self._container_id = None
 
     def _start_teardown(self, work, log_id: str) -> None:
@@ -1391,4 +1423,6 @@ class DockerEnvironment(BaseEnvironment):
         if thread is None or not thread.is_alive():
             return True
         thread.join(timeout=timeout)
+        if getattr(self, "_cleanup_error", None):
+            raise RuntimeError("Container teardown failed") from self._cleanup_error
         return not thread.is_alive()
