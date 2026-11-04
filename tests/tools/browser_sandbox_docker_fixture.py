@@ -97,6 +97,11 @@ def run_fixture(image, root, docker):
                 if not has_profile:
                     raise
                 results.append('stopped-existing-profile-refused')
+            if stopped._container_id:
+                assert docker_run(['inspect','--format','{{index .Config.Labels "hermes-browser-test"}}',
+                                   stopped._container_id]) == task
+                docker_run(['rm',stopped._container_id])
+                stopped._container_id = None
         first = create()
         profile = sandbox_host.browser_profile_dir(first)
         absence_peer = create()
