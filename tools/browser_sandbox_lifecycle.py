@@ -8,13 +8,19 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import hashlib
+import http.client
+import io
 import json
 import os
 from pathlib import Path
 import select
+import socket
+import stat
 import subprocess
+import tarfile
 import time
 import uuid
+from urllib.parse import quote
 
 _ACTIVE = contextvars.ContextVar('sandbox_browser_guard', default=None)
 _ADMISSION = contextvars.ContextVar('sandbox_browser_admission', default=None)
@@ -132,7 +138,7 @@ def _profile_backing_key(env, profile):
 
 
 @contextlib.contextmanager
-def _profile_admission_guard(env, profile):
+def _profile_admission_guard(env, profile, *, container_locked=False):
     """Fence the backing path BEFORE profile creation, including affirmative-absence teardown."""
     if not getattr(env, '_docker_exe', None):
         yield
@@ -141,7 +147,8 @@ def _profile_admission_guard(env, profile):
     if _ADMISSION.get() == identity:
         yield
         return
-    with _host_admission_lock('container:' + env._container_id):
+    container_lock = contextlib.nullcontext() if container_locked else _host_admission_lock('container:' + env._container_id)
+    with container_lock:
         with _host_admission_lock(_profile_backing_key(env, profile)):
             token = _ADMISSION.set(identity)
             try:
@@ -439,33 +446,136 @@ def close_owned_browser(guard, generation, timeout=10):
     return guard.command('stop', generation=generation, timeout=timeout, signal=signal_parent)
 
 
+def _container_snapshot(target):
+    proc = subprocess.run([target._docker_exe, 'inspect', '--format',
+                           '{"Id":{{json .Id}},"State":{{json .State}}}'
+                           '{{range .Config.Env}}{{if eq (printf "%.5s" .) "HOME="}}{{println}}{{json .}}{{end}}{{end}}',
+                           target._container_id], capture_output=True, timeout=10, check=False)
+    if proc.returncode:
+        raise RuntimeError('cannot collect container state; teardown refused')
+    try:
+        lines = proc.stdout.splitlines()
+        data = json.loads(lines[0])
+        if len(lines) > 1:
+            data['Env'] = [json.loads(line) for line in lines[1:]]
+        if not isinstance(data, dict) or not isinstance(data.get('State'), dict):
+            raise ValueError('invalid container state')
+    except (ValueError, TypeError, IndexError) as exc:
+        raise RuntimeError('invalid container state; teardown refused') from exc
+    identity = data.get('Id', '')
+    if (not isinstance(identity, str) or len(identity) != 64 or any(ch not in '0123456789abcdef' for ch in identity)
+            or identity != target._container_id):
+        raise RuntimeError('complete container identity unavailable; teardown refused')
+    if data.get('Env') is not None and (not isinstance(data['Env'], list)
+            or not all(isinstance(value, str) for value in data['Env'])):
+        raise RuntimeError('container environment identity invalid; teardown refused')
+    return data
+
+
+@contextlib.contextmanager
+def _engine_response(target, method, path):
+    endpoint = _local_docker_endpoint(target._docker_exe).removeprefix('unix://')
+    metadata = os.stat(endpoint)
+    uid = getattr(os, 'getuid', lambda: None)()
+    if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid != uid:
+        raise RuntimeError('stopped-container inspection requires an owned local Docker socket')
+    conn = http.client.HTTPConnection('localhost', timeout=10)
+    try:
+        conn.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        conn.sock.settimeout(10)
+        conn.sock.connect(endpoint)
+        conn.request(method, path)
+        response = conn.getresponse()
+        if not response.getheader('Api-Version'):
+            raise RuntimeError('Docker Engine response unverified; teardown refused')
+        yield response
+    except http.client.HTTPException as exc:
+        raise RuntimeError('Docker profile inspection failed; teardown refused') from exc
+    finally:
+        conn.close()
+
+
+def _stopped_profile(target, snapshot):
+    """Resolve the native account home without exec or reading profile contents."""
+    state = snapshot['State']
+    if (state.get('Status') not in ('created', 'exited') or state.get('Pid') != 0
+            or state.get('Running') is not False or state.get('Paused') is not False
+            or state.get('Restarting') is not False or state.get('Dead') is not False):
+        raise RuntimeError('container state is ambiguous; teardown refused')
+    with _engine_response(target, 'GET', '/containers/' + snapshot['Id'] + '/archive?path=%2Fetc%2Fpasswd') as response:
+        if response.status != 200:
+            raise RuntimeError('stopped desktop account identity unavailable; teardown refused')
+        archive = response.read(131073)
+        if len(archive) > 131072:
+            raise RuntimeError('stopped account archive exceeds bound; teardown refused')
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive), mode='r:') as contents:
+            members = contents.getmembers()
+            if len(members) != 1 or members[0].name != 'passwd':
+                raise ValueError('ambiguous account archive')
+            member = members[0]
+            if not member.isfile() or member.size > 65536:
+                raise ValueError('invalid account file')
+            accounts = contents.extractfile(member).read().decode('utf-8').splitlines()
+        from tools.bot_desktop.sandbox_host import DESKTOP_USER
+        accounts = [line.split(':') for line in accounts if line.startswith(DESKTOP_USER + ':')]
+        homes = [value[5:] for value in snapshot.get('Env') or [] if value.startswith('HOME=')]
+        if len(accounts) > 1 or any(len(account) != 7 for account in accounts) or len(homes) > 1:
+            raise ValueError('ambiguous desktop account or environment')
+        home = accounts[0][5] if accounts else (homes[0] if homes else '/root')
+        if not home.startswith('/') or (getattr(target, '_bd_desktop_home', None)
+                                        and target._bd_desktop_home != home):
+            raise ValueError('invalid or changed account home')
+    except (tarfile.TarError, KeyError, ValueError, UnicodeError) as exc:
+        raise RuntimeError('stopped desktop home unproved; teardown refused') from exc
+    return home.rstrip('/') + '/.hermes/bot-desktop/browser-profile'
+
+
 @contextlib.contextmanager
 def container_stop_guard(env, container_id=None):
     """Retain the attachment/takeover fence until the destructive container operation finishes."""
+    from tools.bot_desktop import sandbox_host
+    target = ContainerTarget(env, container_id)
+    with _host_admission_lock('container:' + target._container_id):
+        snapshot = _container_snapshot(target)
+        running = snapshot['State'].get('Running') is True
+        profile = sandbox_host.browser_profile_dir(target) if running else _stopped_profile(target, snapshot)
+        with _profile_admission_guard(target, profile, container_locked=True):
+            if not running:
+                path = '/containers/' + snapshot['Id'] + '/archive?path=' + quote(profile, safe='')
+                with _engine_response(target, 'HEAD', path) as response:
+                    absent = response.status == 404
+                if not absent or _container_snapshot(target) != snapshot:
+                    raise RuntimeError('stopped browser profile absence unproved; teardown refused')
+                yield
+                return
+            with _running_container_stop_guard(target, profile):
+                yield
+
+
+@contextlib.contextmanager
+def _running_container_stop_guard(target, profile):
     from tools.bot_desktop import sandbox_host, lease
     from tools.environments import streams
-    target = ContainerTarget(env, container_id)
-    profile = sandbox_host.browser_profile_dir(target)
-    with _profile_admission_guard(target, profile):
-        challenge = uuid.uuid4().hex
-        script = ('if [ -d "$1" ]; then printf "present:%s" "$2"; exit 0; fi; '
-                  'if [ ! -e "$1" ] && [ ! -L "$1" ]; then printf "absent:%s" "$2"; '
-                  f'exit {_PROFILE_ABSENT_RC}; fi; exit 74')
-        present = streams.run_in(target, ['bash', '-c', script, 'hermes-browser-profile', profile, challenge],
-                                 user=sandbox_host._user_for(target), timeout=10)
-        if present.returncode == _PROFILE_ABSENT_RC and present.stdout == f'absent:{challenge}'.encode():
-            yield
-            return
-        if present.returncode or present.stdout != f'present:{challenge}'.encode():
-            raise RuntimeError('cannot affirm browser profile presence or absence; container stop refused')
-        with profile_guard(target, profile) as guard:
-            state = guard.command('status')
-            if live_holders(guard) or lease.human_holds():
-                raise BrowserBusy('browser has active session/human ownership; container teardown deferred')
-            if state['owner'] or state['processes'] or state['links']:
-                close_owned_browser(guard, state['owner'].get('generation'))
-            guard.command('retire', container=target._container_id)
-            yield
+    challenge = uuid.uuid4().hex
+    script = ('if [ -d "$1" ]; then printf "present:%s" "$2"; exit 0; fi; '
+              'if [ ! -e "$1" ] && [ ! -L "$1" ]; then printf "absent:%s" "$2"; '
+              f'exit {_PROFILE_ABSENT_RC}; fi; exit 74')
+    present = streams.run_in(target, ['bash', '-c', script, 'hermes-browser-profile', profile, challenge],
+                             user=sandbox_host._user_for(target), timeout=10)
+    if present.returncode == _PROFILE_ABSENT_RC and present.stdout == f'absent:{challenge}'.encode():
+        yield
+        return
+    if present.returncode or present.stdout != f'present:{challenge}'.encode():
+        raise RuntimeError('cannot affirm browser profile presence or absence; container stop refused')
+    with profile_guard(target, profile) as guard:
+        state = guard.command('status')
+        if live_holders(guard) or lease.human_holds():
+            raise BrowserBusy('browser has active session/human ownership; container teardown deferred')
+        if state['owner'] or state['processes'] or state['links']:
+            close_owned_browser(guard, state['owner'].get('generation'))
+        guard.command('retire', container=target._container_id)
+        yield
 
 
 @contextlib.contextmanager

@@ -78,6 +78,25 @@ def run_fixture(image, root, docker):
         security = json.loads(docker_run(['info','--format','{{json .SecurityOptions}}']))
         assert any('rootless' in value for value in security), 'fixture requires rootless engine'
         docker_run(['image','inspect',image])
+        # Stopped non-browser containers require a native account path, not exec/fallback absence.
+        for has_profile in (False, True):
+            stopped = create()
+            del stopped._bd_desktop_home
+            del stopped._bd_desktop_user
+            if has_profile:
+                with profile_guard(stopped, sandbox_host.browser_profile_dir(stopped)):
+                    pass
+            docker_run(['stop','-t','10',stopped._container_id])
+            try:
+                with container_stop_guard(stopped):
+                    assert not has_profile, 'stopped existing profile admitted destructive removal'
+                    docker_run(['rm',stopped._container_id])
+                    stopped._container_id = None
+                    results.append('stopped-nonbrowser-confirmed-absence')
+            except RuntimeError:
+                if not has_profile:
+                    raise
+                results.append('stopped-existing-profile-refused')
         first = create()
         profile = sandbox_host.browser_profile_dir(first)
         absence_peer = create()

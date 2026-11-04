@@ -260,6 +260,9 @@ actual profile inode across container stop/replacement; known container restarts
 A container/backing-path admission lock also fences first profile creation against teardown. Confirmed
 profile absence requires a successful in-container protocol, not a generic command failure. Refused
 teardown retains container identity and bind directories, including repeated cleanup or destruction.
+Stopped non-browser replacement verifies the complete stopped identity and resolves the native account
+home from a bounded read-only Engine archive of /etc/passwd, then requires Engine-confirmed profile
+absence and unchanged state under admission. An existing profile or ambiguous state refuses removal.
 A retirement marker blocks dock launch after the container-local lock holder exits, until old ownership
 is proved retired. Unknown ownership refuses recovery. No PID-only signal or blanket Chromium kill is used.
 

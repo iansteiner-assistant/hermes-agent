@@ -61,6 +61,7 @@ def test_failed_docker_removal_retains_identity_and_reports_completed_failure(mo
 def absence_target(tmp_path, monkeypatch):
     from tools import browser_sandbox_lifecycle as lifecycle
     from tools.bot_desktop import sandbox_host
+    monkeypatch.setattr(lifecycle, '_container_snapshot', lambda *args: {'State':{'Running':True}})
     root = tmp_path/'locks'
     root.mkdir()
     monkeypatch.setattr(lifecycle, '_host_records', lambda: root)
