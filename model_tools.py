@@ -218,6 +218,9 @@ def get_tool_definitions(enabled_toolsets: Optional[list[str]] = None, disabled_
     skip_tool_search_assembly returns raw schemas for every enabled tool — only
     the tool_search bridge should use it (it reads the real, uncollapsed catalog).
     """
+    if enabled_toolsets == []:
+        # Zero capability is explicit. Even a granted remote connector must not add its search/call bridge.
+        return []
     def compute():
         return _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
                                          skip_tool_search_assembly=skip_tool_search_assembly)
