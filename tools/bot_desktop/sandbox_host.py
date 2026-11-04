@@ -115,17 +115,27 @@ def _remote_dir(env: Any, profile: str) -> str:
 
 
 def desktop_home(env: Any) -> str:
-    """``$HOME`` of the user the desktop and the browser run as inside ``env`` (cached on the env). This
+    """Home of the user the desktop and the browser run as inside ``env`` (cached on the env). This
     is where state that must outlive a container stop goes: ``/tmp`` in the Docker backend is a 512 MB
     tmpfs that is emptied on every stop and shared with the sandbox's scratch, so a browser profile
     (logins, cookies) there would vanish and grow into that cap."""
     cached = getattr(env, "_bd_desktop_home", None)
     if cached:
         return cached
-    proc = streams.run_in(env, ["bash", "-c", 'printf %s "$HOME"'], user=_user_for(env), timeout=15)
-    home = proc.stdout.decode("utf-8", "replace").strip() if proc.returncode == 0 else ""
+    user = _user_for(env)
+    # Docker exec -u pn changes the uid but can leave HOME=/root from the container's
+    # environment. Resolve the account home before trusting that inherited variable.
+    if user:
+        account = streams.run_in(env, ["getent", "passwd", user], timeout=15)
+        fields = account.stdout.decode("utf-8", "replace").strip().split(":") if account.returncode == 0 else []
+        home = fields[5] if len(fields) >= 7 else ""
+    else:
+        home = ""
     if not home or not home.startswith("/"):
-        home = f"/home/{DESKTOP_USER}" if _user_for(env) else "/root"
+        proc = streams.run_in(env, ["bash", "-c", 'printf %s "$HOME"'], user=user, timeout=15)
+        home = proc.stdout.decode("utf-8", "replace").strip() if proc.returncode == 0 else ""
+    if not home or not home.startswith("/"):
+        home = f"/home/{DESKTOP_USER}" if user else "/root"
     env._bd_desktop_home = home
     return home
 
@@ -295,6 +305,12 @@ def stop(env: Any, profile: str) -> bool:
     """Kill the launcher's session (Xvnc, dbus, Xfce, anything the desktop spawned) and, as a backstop, every
     process still holding this profile's rfb.sock or Xauthority path (a launcher that lost its pid file left
     an Xvnc that 'Server is already active for display 20' on the next start). True when something was live."""
+    from tools.browser_sandbox_lifecycle import desktop_stop_guard
+    with desktop_stop_guard(env):
+        return _stop_desktop_processes(env, profile)
+
+
+def _stop_desktop_processes(env: Any, profile: str) -> bool:
     rdir = _remote_dir(env, profile)
     q = shlex.quote(rdir)
     script = f"""

@@ -368,6 +368,18 @@ def test_sandbox_cdp_endpoint_is_rewritten_to_the_forwarded_local_port(monkeypat
         out = b"9223\n/devtools/browser/abc\n" if "DevToolsActivePort" in " ".join(argv) else b""
         return subprocess.CompletedProcess(argv, 0, out, b"")
     monkeypatch.setattr(streams, "run_in", run_in)
+    from tools import browser_sandbox_lifecycle
+    from types import SimpleNamespace
+    import contextlib
+    state = {"holders": {}, "owner": {}, "endpoint": [9223, "/devtools/browser/abc"], "links": {}, "processes": []}
+    def command(operation, **values):
+        if operation == "holders":
+            state["holders"] = values["holders"]
+        return state if operation == "status" else {}
+    @contextlib.contextmanager
+    def guard(env, profile):
+        yield SimpleNamespace(env=env, profile=profile, command=command)
+    monkeypatch.setattr(browser_sandbox_lifecycle, "profile_guard", guard)
     monkeypatch.setattr(streams, "forward_port", lambda env, port, *, remote_host="127.0.0.1", user=None: 45000 + port % 7)
 
     info = browser_session.get_session_info("t")

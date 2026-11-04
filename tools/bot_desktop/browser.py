@@ -101,7 +101,8 @@ def dock_argv(exe: str, user_data_dir: str, *, sandbox_bypass: Optional[bool] = 
                                               else sandbox_bypass) else ())]
 
 
-def dock_exec_line(exe: str, user_data_dir: str, *, sandbox_bypass: Optional[bool] = None) -> str:
+def dock_exec_line(exe: str, user_data_dir: str, *, sandbox_bypass: Optional[bool] = None,
+                   launcher_argv: Optional[list[str]] = None) -> str:
     """The ``Exec=`` line of the dock's ``.desktop`` entry. Every argument is double-quoted per the
     Desktop Entry spec (a browser under ``/opt/Google Chrome/`` or a profile under a spaced HERMES_HOME
     otherwise splits into garbage): inside the quotes ``" ` $ \\`` are backslash-escaped, and because the
@@ -109,4 +110,4 @@ def dock_exec_line(exe: str, user_data_dir: str, *, sandbox_bypass: Optional[boo
     def quote(arg: str) -> str:
         quoted = "".join("\\" + ch if ch in '"`$\\' else ch for ch in arg)
         return '"' + quoted.replace("\\", "\\\\") + '"'
-    return "Exec=" + " ".join(quote(arg) for arg in dock_argv(exe, user_data_dir, sandbox_bypass=sandbox_bypass))
+    return "Exec=" + " ".join(quote(arg) for arg in (launcher_argv or dock_argv(exe, user_data_dir, sandbox_bypass=sandbox_bypass)))

@@ -3,12 +3,15 @@ env out of ``_active_environments`` (the atexit drain only knew the registry, so
 detached env died with the interpreter and left a stopped, labeled container behind)."""
 
 import subprocess
+import contextlib
 import threading
 
 import tools.environments.docker as docker_env
 from tools import terminal_tool
 
 def _env_with_slow_teardown(monkeypatch, release: threading.Event, seen: list):
+    from tools import browser_sandbox_lifecycle
+    monkeypatch.setattr(browser_sandbox_lifecycle, "container_stop_guard", lambda *a: contextlib.nullcontext())
     docker_env._cgroup_limits_ok = True
     monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
 

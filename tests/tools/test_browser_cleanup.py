@@ -282,12 +282,59 @@ class _Completed:
         self.returncode, self.stdout, self.stderr = returncode, stdout, b""
 
 
+class _LifecycleTransport:
+    """Fake the lifecycle transport while retaining session/holder/launcher decisions under test."""
+    def __init__(self, sandbox, env):
+        self.sandbox, self.env = sandbox, env
+        self.owner, self.holders = {}, {}
+
+    def command(self, op, **kw):
+        sandbox = self.sandbox
+        running = sandbox.running.get(self.env) if isinstance(sandbox.running, dict) else sandbox.running
+        if op == 'status':
+            published = getattr(sandbox, 'port_published', True) and 'cat' not in getattr(sandbox, 'timeouts', set())
+            browser_id = getattr(sandbox, 'browser_id', str(running))
+            return {'owner':self.owner, 'holders':self.holders, 'links':{}, 'processes':[],
+                    'endpoint':[9222, '/devtools/browser/'+browser_id] if running and published else None}
+        if op == 'owned_endpoint':
+            return {'endpoint': None}
+        if op == 'holders':
+            self.holders = kw['holders']
+            return {}
+        if op == 'launch':
+            response = sandbox.run_in(self.env, ['setsid'])
+            self.owner = {'pid':int(response.stdout.split()[0]), 'start':'777', 'generation':'fixture', 'exit_code':None}
+            return {}
+        if op == 'stop':
+            sandbox.run_in(self.env, ['bash','-c','kill -TERM','fixture',str(self.owner['pid'])])
+            return {'stopped':True}
+        raise AssertionError(op)
+
+
+def _install_lifecycle_transport(monkeypatch, sandbox):
+    from tools import browser_sandbox_lifecycle as lifecycle_transport
+    guards = {}
+    mutex = threading.RLock()
+    @contextlib.contextmanager
+    def guarded(env, profile):
+        with mutex:
+            guard = guards.setdefault(env, _LifecycleTransport(sandbox, env))
+            token = lifecycle_transport._ACTIVE.set(guard)
+            guard.profile = profile
+            try:
+                yield guard
+            finally:
+                lifecycle_transport._ACTIVE.reset(token)
+    monkeypatch.setattr(lifecycle_transport, 'profile_guard', guarded)
+
+
 @pytest.fixture
 def fake_sandbox(monkeypatch, isolated_sessions):
     from tools import browser_session_sandbox
     from tools.bot_desktop import runtime, sandbox_host
     from tools.environments import streams
     sandbox, env = _FakeSandbox(), object()
+    _install_lifecycle_transport(monkeypatch, sandbox)
     monkeypatch.setattr(browser_session_sandbox, "_launched", {}, raising=False)
     monkeypatch.setattr(browser_session_sandbox, "_confirmed", {}, raising=False)
     monkeypatch.setattr(streams, "run_in", sandbox.run_in)
@@ -398,11 +445,12 @@ class TestSandboxBrowserOwnership:
             create_sandbox_session("task-A")
         assert fake_sandbox.killed == [4242]
 
-    def test_a_timed_out_stop_does_not_crash_the_teardown(self, fake_sandbox, isolated_sessions):
+    def test_a_timed_out_stop_is_reported_by_the_teardown(self, fake_sandbox, isolated_sessions):
         from tools.browser_session_sandbox import create_sandbox_session
         isolated_sessions["task-A"] = create_sandbox_session("task-A")
         fake_sandbox.timeouts.add("kill")
-        lifecycle.cleanup_single_session("task-A")
+        with pytest.raises(subprocess.TimeoutExpired):
+            lifecycle.cleanup_single_session("task-A")
         assert "task-A" not in isolated_sessions
 
     def test_sessions_racing_onto_one_container_launch_one_browser(self, fake_sandbox):
@@ -458,6 +506,7 @@ def fake_containers(monkeypatch, isolated_sessions):
     from tools.bot_desktop import runtime, sandbox_host
     from tools.environments import streams
     containers = _FakeContainers()
+    _install_lifecycle_transport(monkeypatch, containers)
     monkeypatch.setattr(browser_session_sandbox, "_launched", {}, raising=False)
     monkeypatch.setattr(browser_session_sandbox, "_confirmed", {}, raising=False)
     monkeypatch.setattr(streams, "run_in", containers.run_in)
