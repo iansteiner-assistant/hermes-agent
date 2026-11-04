@@ -257,16 +257,22 @@ small private helper, with at most 16KiB of stderr per launch and four retained 
 death is reported directly. A shell successfully detaching is not browser readiness. The agent and dock
 share one persistent profile and its lifecycle flock. Local Docker also retains a host flock keyed to the
 actual profile inode across container stop/replacement; known container restarts use the same mapping.
+A container/backing-path admission lock also fences first profile creation against teardown. Confirmed
+profile absence requires a successful in-container protocol, not a generic command failure. Refused
+teardown retains container identity and bind directories, including repeated cleanup or destruction.
 A retirement marker blocks dock launch after the container-local lock holder exits, until old ownership
 is proved retired. Unknown ownership refuses recovery. No PID-only signal or blanket Chromium kill is used.
 
 `tools.browser_readiness.check_browser_readiness(task_id=..., timeout=45)` is an internal library callable
 for nightly and update acceptance. Bind the normal served-profile and terminal-task context first; the
 caller's task ID labels the browser check, not a new terminal container. The check uses native browser_exec
-on the actual configured sandbox/profile, creates one synthetic target, verifies JS/DOM and a bounded PNG,
+on the actual configured sandbox/profile, creates one synthetic target, verifies JS/DOM and a fully decoded
+bounded PNG containing deterministic rendered colors,
 and closes only its own target. Its profile reservation excludes new attachments, dock launch and human
 takeover through cleanup. Existing owners return `deferred`; an existing idle browser is preserved. A
-check-created sole-owner browser must exit and release singleton links before `healthy` can be returned.
+check-created sole-owner browser is closed through native CDP and must exit and release singleton links
+before `healthy` can be returned. Shutdown verifies the recorded process identity before requesting close
+and confirms actual exit; an ambiguous close result never authorizes an extra signal.
 The structured result includes `status`, `reason`, `checks`, `cleanup`, and private route identity. No
 provider inference, third-party portal or notification is part of this callable.
 
@@ -279,5 +285,5 @@ Quarantine is recovery evidence: do not restore old singleton links over a runni
 Focused tests use `scripts/run_tests.sh`. The explicit
 `tests/tools/browser_sandbox_docker_fixture.py --image EXISTING_IMAGE --root NEW_PRIVATE_DIRECTORY` fixture
 uses disposable labelled containers, network none, one new bind-backed profile and the already installed
-image. It verifies actual Chromium clean exit, foreign singleton failure/quarantine/retry, cross-container
-exclusion and a replacement-spanning restart fence. It never mounts production profiles or credentials.
+image. It verifies actual Chromium rendering and clean exit, foreign singleton failure/quarantine/retry,
+cross-container exclusion, first-launch admission and a replacement-spanning restart fence. It never mounts production profiles or credentials.

@@ -296,6 +296,8 @@ class _LifecycleTransport:
             browser_id = getattr(sandbox, 'browser_id', str(running))
             return {'owner':self.owner, 'holders':self.holders, 'links':{}, 'processes':[],
                     'endpoint':[9222, '/devtools/browser/'+browser_id] if running and published else None}
+        if op == 'owned_endpoint':
+            return {'endpoint': None}
         if op == 'holders':
             self.holders = kw['holders']
             return {}

@@ -866,7 +866,9 @@ def _start_in_sandbox(wait_seconds: float) -> DesktopStatus:
     sd = state_dir()
     sd.mkdir(parents=True, exist_ok=True)
     os.chmod(sd, 0o700)
-    with _flocked(sd / "start.lock"):
+    from tools.browser_sandbox_lifecycle import profile_guard
+    profile = sandbox_host.browser_profile_dir(env)
+    with profile_guard(env, profile), _flocked(sd / "start.lock"):
         # The dock's Browser icon runs the sandbox's own Playwright Chromium on the profile the agent's browser
         # uses there: the human's browser is the bot's browser, as on the host.
         from tools.bot_desktop.browser import dock_exec_line

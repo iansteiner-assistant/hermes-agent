@@ -7,17 +7,33 @@ import time
 
 
 def _synthetic_code(nonce):
+    html = ('<head><style>html,body{margin:0;width:64px;height:64px;overflow:hidden}</style></head>'
+            f'<body><div id="hermes-readiness" data-nonce="{nonce}" '
+            'style="position:absolute;left:0;top:0;width:32px;height:64px;background:rgb(17,83,149)"></div>'
+            '<div style="position:absolute;left:32px;top:0;width:32px;height:64px;background:rgb(211,47,97)"></div></body>')
+    expression = 'document.documentElement.innerHTML = ' + json.dumps(html)
     return f'''# Verify the local browser using a temporary synthetic tab
-import base64, json
+import base64, io
+from PIL import Image
 _tid = cdp("Target.createTarget", url="about:blank")["targetId"]
 try:
     switch_tab(_tid)
-    js('document.body.innerHTML = "<p id=hermes-readiness>{nonce}</p>"')
-    assert js('document.getElementById("hermes-readiness").textContent') == "{nonce}"
+    js({expression!r})
+    assert js('document.getElementById("hermes-readiness").getAttribute("data-nonce")') == "{nonce}"
     _shot = cdp("Page.captureScreenshot", format="png", clip={{"x":0,"y":0,"width":64,"height":64,"scale":1}})
+    assert len(_shot["data"]) <= 1398104
     _raw = base64.b64decode(_shot["data"], validate=True)
-    assert _raw.startswith(b"\\x89PNG\\r\\n\\x1a\\n") and 24 <= len(_raw) <= 1048576
-    assert int.from_bytes(_raw[16:20], "big") == 64 and int.from_bytes(_raw[20:24], "big") == 64
+    assert len(_raw) <= 1048576
+    with Image.open(io.BytesIO(_raw)) as _image:
+        assert _image.format == "PNG" and _image.size == (64, 64)
+        _image.verify()
+    with Image.open(io.BytesIO(_raw)) as _image:
+        _pixels = _image.convert("RGB")
+        _pixels.load()
+        for _xs, _rgb in (((8,24),(17,83,149)), ((40,56),(211,47,97))):
+            for _x in _xs:
+                for _y in (8,32,56):
+                    assert all(abs(_a-_b) <= 1 for _a,_b in zip(_pixels.getpixel((_x,_y)),_rgb))
     print("HERMES_BROWSER_READY:{nonce}")
 finally:
     assert cdp("Target.closeTarget", targetId=_tid).get("success") is True

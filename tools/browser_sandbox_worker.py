@@ -200,7 +200,7 @@ def stop(profile, request):
     if record.get('generation') != request.get('generation'):
         raise RuntimeError('browser ownership changed; refusing stop')
     pid = record['pid']
-    if start_time(pid) is not None:
+    if start_time(pid) is not None and request.get('signal', True):
         if not ours(record, profile):
             raise RuntimeError('browser identity cannot be proved; refusing signal')
         # pidfd binds the signal to this process even if it exits/recycles after verification.
@@ -249,6 +249,17 @@ def dispatch(profile, request):
         return status(profile)
     if op == 'launch':
         return launch(profile, request)
+    if op == 'owned_endpoint':
+        state = status(profile)
+        record = state['owner']
+        if not record or record.get('generation') != request.get('generation'):
+            raise RuntimeError('browser generation changed; refusing close')
+        if start_time(record['pid']) is not None:
+            if not ours(record, profile):
+                raise RuntimeError('browser identity cannot be proved; refusing close')
+        elif state['endpoint'] or state['processes']:
+            raise RuntimeError('browser owner changed after exit; refusing close')
+        return {'endpoint': state['endpoint']}
     if op == 'stop':
         return stop(profile, request)
     if op == 'quarantine':

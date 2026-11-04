@@ -242,7 +242,7 @@ def stop_sandbox_browser(session_info: dict[str, Any]) -> None:
 
 
 def _stop_launched(key: str) -> None:
-    from tools.browser_sandbox_lifecycle import profile_guard
+    from tools.browser_sandbox_lifecycle import profile_guard, close_owned_browser
     from tools.bot_desktop import lease
     with _launched_lock:
         launched = _launched.get(key)
@@ -256,7 +256,7 @@ def _stop_launched(key: str) -> None:
         record = state['owner']
         if record.get('pid') != pid or record.get('start') != start:
             raise RuntimeError('browser ownership changed; refusing stop')
-        guard.command('stop', generation=record.get('generation'), timeout=10)
+        close_owned_browser(guard, record.get('generation'))
         with _launched_lock:
             _launched.pop(key, None)
 

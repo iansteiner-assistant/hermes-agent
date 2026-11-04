@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 def run_fixture(image, root, docker):
     from tools.browser_sandbox_lifecycle import profile_guard, orphan_proof, container_stop_guard, BrowserBusy
-    from tools.browser_sandbox_lifecycle import registered_container_guard
+    from tools.browser_sandbox_lifecycle import registered_container_guard, close_owned_browser
     from tools.environments.docker import DockerEnvironment
     from tools.bot_desktop import sandbox_host
     from tools.browser_session_sandbox import _wait_for_port
@@ -55,20 +55,49 @@ def run_fixture(image, root, docker):
                                      '--headless=new','--no-sandbox','--disable-dev-shm-usage','about:blank'],
                       container=env._container_id)
         return _wait_for_port(env, None, profile)
+    def verify_render(env, endpoint):
+        from tools.environments import streams
+        from tools.browser_cdp_tool import _run_async, _cdp_call
+        from tools.browser_readiness import _synthetic_code
+        local = streams.forward_port(env, endpoint[0], user=None)
+        url = f'ws://127.0.0.1:{local}{endpoint[1]}'
+        selected = [None]
+        def cdp(method, **params):
+            target = None if method.startswith(('Target.', 'Browser.')) else selected[0]
+            return _run_async(_cdp_call(url, method, params, target, 5))
+        def switch_tab(target):
+            selected[0] = target
+        def js(expression):
+            response = cdp('Runtime.evaluate', expression=expression, returnByValue=True, awaitPromise=True)
+            if response.get('exceptionDetails'):
+                raise RuntimeError('synthetic marker JavaScript failed')
+            return response.get('result', {}).get('value')
+        exec(_synthetic_code(uuid.uuid4().hex), {'cdp':cdp, 'switch_tab':switch_tab, 'js':js})
+        results.append('real-cdp-rendered-png-marker')
     try:
         security = json.loads(docker_run(['info','--format','{{json .SecurityOptions}}']))
         assert any('rootless' in value for value in security), 'fixture requires rootless engine'
         docker_run(['image','inspect',image])
         first = create()
         profile = sandbox_host.browser_profile_dir(first)
+        absence_peer = create()
+        with container_stop_guard(first):
+            try:
+                with profile_guard(absence_peer, profile):
+                    raise AssertionError('first launch raced affirmative profile absence')
+            except BrowserBusy:
+                results.append('affirmative-absence-first-launch-fence')
+        docker_run(['rm','-f',absence_peer._container_id])
+        absence_peer._container_id = None
         with profile_guard(first, profile) as guard:
-            launch(first, guard)
+            endpoint = launch(first, guard)
+            verify_render(first, endpoint)
             owner = guard.command('status')['owner']
             deadline = time.monotonic() + 5
             while not owner.get('singletons') and time.monotonic() < deadline:
                 owner = guard.command('status')['owner']
             assert set(owner['singletons']) == {'SingletonLock','SingletonSocket','SingletonCookie'}
-            guard.command('stop', generation=owner['generation'], timeout=10)
+            close_owned_browser(guard, owner['generation'])
             state = guard.command('status')
             assert not state['links'] and not state['processes'] and not state['endpoint']
             results.append('clean-exit-and-singleton-release')
@@ -79,6 +108,12 @@ def run_fixture(image, root, docker):
                 orphan = guard.command('status')['owner']
         # Crash only the disposable browser, then remove only its exact labelled test container.
         docker_run(['exec',first._container_id,'kill','-KILL',str(orphan['pid'])])
+        with profile_guard(first, profile) as guard:
+            deadline = time.monotonic() + 5
+            orphan = guard.command('status')['owner']
+            while orphan.get('exit_code') is None and time.monotonic() < deadline:
+                orphan = guard.command('status')['owner']
+            assert orphan.get('exit_code') is not None, 'actual child exit status was not finalized'
         docker_run(['rm','-f',first._container_id])
         old_container = first._container_id
         first._container_id = None
@@ -106,7 +141,7 @@ def run_fixture(image, root, docker):
             docker_run(['rm','-f',third._container_id])
             third._container_id = None
             owner = guard.command('status')['owner']
-            guard.command('stop', generation=owner['generation'], timeout=10)
+            close_owned_browser(guard, owner['generation'])
         # The host-held lock survives the container-local helper's exit on stop.
         second_id = second._container_id
         with container_stop_guard(second):

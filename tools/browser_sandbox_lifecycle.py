@@ -1,6 +1,6 @@
 """Host-side access to the sandbox's profile lifecycle critical section.
 
-Lock order: resolve sandbox/profile, actual-profile flock, home lease lock, short session locks.
+Lock order: container/backing admission, actual-profile flock, home lease lock, short session locks.
 A context-local guard is the reservation capability for nested calls. Never pass it to another thread.
 """
 from __future__ import annotations
@@ -17,6 +17,8 @@ import time
 import uuid
 
 _ACTIVE = contextvars.ContextVar('sandbox_browser_guard', default=None)
+_ADMISSION = contextvars.ContextVar('sandbox_browser_admission', default=None)
+_PROFILE_ABSENT_RC = 73
 
 
 class BrowserBusy(RuntimeError):
@@ -104,6 +106,51 @@ def _local_docker_endpoint(docker):
 
 
 @contextlib.contextmanager
+def _host_admission_lock(key):
+    from tools.browser_launcher_holders import records_lock
+    directory = _host_records() / ('admission-' + hashlib.sha256(key.encode()).hexdigest())
+    directory.mkdir(mode=0o700, exist_ok=True)
+    with records_lock(directory, blocking=False) as held:
+        if not held:
+            raise BrowserBusy('browser creation or container teardown already admitted')
+        yield
+
+
+def _profile_backing_key(env, profile):
+    _local_docker_endpoint(env._docker_exe)
+    proc = subprocess.run([env._docker_exe, 'inspect', '--format', '{{json .Mounts}}', env._container_id],
+                          capture_output=True, timeout=10, check=False)
+    if proc.returncode:
+        raise RuntimeError('cannot identify browser profile backing; teardown refused')
+    mounts = json.loads(proc.stdout)
+    shared = [mount for mount in mounts if mount.get('Source', '').startswith('/')
+              and (profile == mount['Destination'] or profile.startswith(mount['Destination'].rstrip('/') + '/'))]
+    if shared:
+        mount = max(shared, key=lambda value: len(value['Destination']))
+        return 'backing:' + os.path.realpath(mount['Source'] + profile[len(mount['Destination']):])
+    return 'container:' + env._container_id + ':' + profile
+
+
+@contextlib.contextmanager
+def _profile_admission_guard(env, profile):
+    """Fence the backing path BEFORE profile creation, including affirmative-absence teardown."""
+    if not getattr(env, '_docker_exe', None):
+        yield
+        return
+    identity = (env._docker_exe, env._container_id, profile)
+    if _ADMISSION.get() == identity:
+        yield
+        return
+    with _host_admission_lock('container:' + env._container_id):
+        with _host_admission_lock(_profile_backing_key(env, profile)):
+            token = _ADMISSION.set(identity)
+            try:
+                yield
+            finally:
+                _ADMISSION.reset(token)
+
+
+@contextlib.contextmanager
 def _host_profile_guard(env, profile):
     """A local-Docker host flock survives docker stop, unlike the sandbox exec's guard.
 
@@ -148,6 +195,7 @@ def registered_container_guard(container):
     record = _container_record(container)
     identities = json.loads(record.read_text(encoding='utf-8-sig')) if record.exists() else []
     with contextlib.ExitStack() as stack:
+        stack.enter_context(_host_admission_lock('container:' + container))
         for identity in sorted(identities):
             directory = _host_records() / hashlib.sha256(identity.encode()).hexdigest()
             directory.mkdir(mode=0o700, exist_ok=True)
@@ -162,7 +210,7 @@ def profile_guard(env, profile):
     if existing is not None:
         yield existing
         return
-    with _host_profile_guard(env, profile):
+    with _profile_admission_guard(env, profile), _host_profile_guard(env, profile):
         with _sandbox_profile_guard(env, profile) as guard:
             yield guard
 
@@ -286,8 +334,10 @@ def orphan_proof(env, profile, record):
     is sufficient proof. The caller still holds the actual profile lock through quarantine and retry.
     """
     from tools.environments.docker import DockerEnvironment
-    if not isinstance(env, DockerEnvironment) or not record.get('container'):
-        raise RuntimeError('orphan repair requires a recorded rootless Docker owner')
+    container = record.get('container', '')
+    if (not isinstance(env, DockerEnvironment) or len(container) != 64
+            or any(ch not in '0123456789abcdef' for ch in container)):
+        raise RuntimeError('orphan repair requires a complete recorded rootless Docker owner')
     docker = env._docker_exe
     def query(args):
         proc = subprocess.run([docker, *args], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15, check=False)
@@ -363,6 +413,32 @@ class ContainerTarget:
                 *(['-u', user] if user else []), self._container_id]
 
 
+def close_owned_browser(guard, generation, timeout=10):
+    """Ask Chromium to close over its native CDP endpoint, then prove exit and singleton release.
+
+    A clean SIGTERM exit can leave Chromium singleton links behind. CDP is the normal shutdown path;
+    signal only when there is no endpoint or the WebSocket handshake proved no close was sent.
+    """
+    from tools.bot_desktop import sandbox_host
+    from tools.environments import streams
+    from tools.browser_cdp_tool import _run_async, _cdp_call
+    from websockets.exceptions import InvalidHandshake, WebSocketException
+    owned = guard.command('owned_endpoint', generation=generation)
+    endpoint = owned['endpoint']
+    signal_parent = endpoint is None
+    if endpoint is not None:
+        local = streams.forward_port(guard.env, endpoint[0], user=sandbox_host._user_for(guard.env))
+        url = f'ws://127.0.0.1:{local}{endpoint[1]}'
+        try:
+            _run_async(_cdp_call(url, 'Browser.close', {}, None, min(timeout, 5)))
+        except InvalidHandshake:
+            signal_parent = True  # no WebSocket opened, so no CDP close command was sent
+        except (WebSocketException, OSError, RuntimeError, TimeoutError):
+            # Disconnect after send is a normal close outcome; actual exit/link release decides.
+            signal_parent = False
+    return guard.command('stop', generation=generation, timeout=timeout, signal=signal_parent)
+
+
 @contextlib.contextmanager
 def container_stop_guard(env, container_id=None):
     """Retain the attachment/takeover fence until the destructive container operation finishes."""
@@ -370,20 +446,26 @@ def container_stop_guard(env, container_id=None):
     from tools.environments import streams
     target = ContainerTarget(env, container_id)
     profile = sandbox_host.browser_profile_dir(target)
-    present = streams.run_in(target, ['test', '-d', profile], user=sandbox_host._user_for(target), timeout=10)
-    if present.returncode == 1:
-        yield
-        return
-    if present.returncode:
-        raise RuntimeError('cannot determine browser profile presence; container stop refused')
-    with profile_guard(target, profile) as guard:
-        state = guard.command('status')
-        if live_holders(guard) or lease.human_holds():
-            raise BrowserBusy('browser has active session/human ownership; container teardown deferred')
-        if state['owner'] or state['processes'] or state['links']:
-            guard.command('stop', generation=state['owner'].get('generation'), timeout=10)
-        guard.command('retire', container=target._container_id)
-        yield
+    with _profile_admission_guard(target, profile):
+        challenge = uuid.uuid4().hex
+        script = ('if [ -d "$1" ]; then printf "present:%s" "$2"; exit 0; fi; '
+                  'if [ ! -e "$1" ] && [ ! -L "$1" ]; then printf "absent:%s" "$2"; '
+                  f'exit {_PROFILE_ABSENT_RC}; fi; exit 74')
+        present = streams.run_in(target, ['bash', '-c', script, 'hermes-browser-profile', profile, challenge],
+                                 user=sandbox_host._user_for(target), timeout=10)
+        if present.returncode == _PROFILE_ABSENT_RC and present.stdout == f'absent:{challenge}'.encode():
+            yield
+            return
+        if present.returncode or present.stdout != f'present:{challenge}'.encode():
+            raise RuntimeError('cannot affirm browser profile presence or absence; container stop refused')
+        with profile_guard(target, profile) as guard:
+            state = guard.command('status')
+            if live_holders(guard) or lease.human_holds():
+                raise BrowserBusy('browser has active session/human ownership; container teardown deferred')
+            if state['owner'] or state['processes'] or state['links']:
+                close_owned_browser(guard, state['owner'].get('generation'))
+            guard.command('retire', container=target._container_id)
+            yield
 
 
 @contextlib.contextmanager
@@ -395,5 +477,5 @@ def desktop_stop_guard(env):
         if live_holders(guard) or lease.human_holds():
             raise BrowserBusy('browser is in use; desktop stop deferred')
         if state['owner'] or state['processes'] or state['links']:
-            guard.command('stop', generation=state['owner'].get('generation'), timeout=10)
+            close_owned_browser(guard, state['owner'].get('generation'))
         yield
